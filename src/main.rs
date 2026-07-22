@@ -130,6 +130,16 @@ struct Overrides {
     /// Recompute activations in the backward.
     #[arg(long)]
     checkpointing: Option<bool>,
+    /// SSD algorithm: serial retains intermediates for speed; recalculated saves memory.
+    #[arg(long, value_enum)]
+    ssd: Option<Ssd>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Ssd {
+    Minimal,
+    Serial,
+    Recalculated,
 }
 
 /// The model-shape knobs worth sweeping without editing a preset, because they
@@ -188,7 +198,7 @@ fn main() -> Result<()> {
             // silently building a wider embedding would be dead parameters.
             let mut cfg = shape.apply(preset.config());
             cfg.vocab_size = Shards::open(&data.join("train"))?.meta().vocab_size;
-            let run = run.apply(train::Run::new());
+            let run = run.apply(preset.run_defaults());
             train::run(&cfg, &run, &data, &out, &Device::default())?;
             Ok(())
         }
@@ -298,6 +308,23 @@ impl Preset {
             Self::Toy => config::Model::toy(),
         }
     }
+
+    /// Run defaults that have been validated for one exact production shape.
+    ///
+    /// The retained graph fits `tiny-turbo` at micro-batch 4 without outer
+    /// checkpointing on the 16-GB target card. Accumulation rises inversely so
+    /// the default token budget is unchanged. Larger presets keep the
+    /// memory-saving defaults; callers can still override every path.
+    fn run_defaults(self) -> train::Run {
+        match self {
+            Self::TinyTurbo => train::Run::new()
+                .with_micro_batch(4)
+                .with_accum(32)
+                .with_checkpointing(false)
+                .with_ssd_mode(Some(config::SsdMode::Serial)),
+            Self::Tiny | Self::Base | Self::Toy => train::Run::new(),
+        }
+    }
 }
 
 impl Shape {
@@ -339,6 +366,34 @@ impl Overrides {
             muon,
             checkpointing
         );
+        if let Some(ssd) = self.ssd {
+            run.ssd_mode = Some(match ssd {
+                Ssd::Minimal => config::SsdMode::Minimal,
+                Ssd::Serial => config::SsdMode::Serial,
+                Ssd::Recalculated => config::SsdMode::Recalculated,
+            });
+        }
         run
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_tiny_turbo_uses_the_measured_training_defaults() {
+        let turbo = Preset::TinyTurbo.run_defaults();
+
+        assert_eq!(turbo.ssd_mode, Some(config::SsdMode::Serial));
+        assert_eq!((turbo.micro_batch, turbo.accum), (4, 32));
+        assert!(!turbo.checkpointing);
+
+        for preset in [Preset::Tiny, Preset::Base, Preset::Toy] {
+            let run = preset.run_defaults();
+            assert_eq!(run.ssd_mode, None);
+            assert_eq!((run.micro_batch, run.accum), (8, 16));
+            assert!(run.checkpointing);
+        }
     }
 }

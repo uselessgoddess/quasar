@@ -11,6 +11,28 @@
 use burn::prelude::*;
 use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 
+/// How burn-mamba evaluates the chunked SSD recurrence during training.
+///
+/// All variants have the same forward and gradients. `Recalculated` retains
+/// only the inputs of the SSD and rebuilds its intermediates in the backward;
+/// `Serial` lets autodiff retain the chunkwise intermediates; `Minimal` uses
+/// burn-mamba's mostly-batched formulation and lets autodiff retain its graph.
+#[derive(Config, Debug, PartialEq, Eq)]
+pub enum SsdMode {
+    Minimal,
+    Serial,
+    Recalculated,
+}
+
+// `Config` is a derive macro too, and its enum expansion does not preserve the
+// standard `#[default]` helper attribute on every feature combination.
+#[allow(clippy::derivable_impls)]
+impl Default for SsdMode {
+    fn default() -> Self {
+        Self::Recalculated
+    }
+}
+
 /// What mixes tokens in a layer.
 ///
 /// A pure-SSM stack recalls an arbitrary earlier token poorly — its memory is a
@@ -145,15 +167,18 @@ impl Model {
     /// fifth of the pairs a 1024 one does, and a 1024-token sequence halves what
     /// is left. `docs/MEMORY.md` has the per-knob arithmetic. What it buys is a
     /// micro-batch above one on 16 GB, which is where the throughput was lost.
+    /// The 640 x 12 shape has practically the same parameter and FLOP budgets
+    /// as 512 x 20, but measured faster because its GEMMs are wider and 40%
+    /// fewer layers are dispatched sequentially.
     pub fn tiny_turbo() -> Self {
-        Self::new(32_768, 512, 20)
+        Self::new(32_768, 640, 12)
             .with_seq_len(1024)
             .with_state_rank(64)
             .with_head_dim(64)
             .with_n_groups(1)
             .with_mimo_rank(1)
             .with_attn_period(Some(5))
-            .with_attn_heads(8)
+            .with_attn_heads(10)
             .with_attn_kv_heads(2)
             .with_attn_window(Some(256))
             .with_ffn_mult(2.0)
@@ -535,6 +560,14 @@ mod tests {
         Model::base().validate().unwrap();
         Model::toy().validate().unwrap();
         Model::tiny_turbo().validate().unwrap();
+    }
+
+    #[test]
+    fn turbo_uses_the_measured_wide_shape() {
+        let turbo = Model::tiny_turbo();
+
+        assert_eq!((turbo.d_model, turbo.n_layers, turbo.attn_heads), (640, 12, 10));
+        assert!((78_000_000..79_000_000).contains(&turbo.budget().total));
     }
 
     #[test]

@@ -5,28 +5,62 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
   check:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      # burn-mamba is a subtree with its own formatting checks and upstream
+      # history; format the Quasar package without rewriting vendored sources.
+      - run: cargo fmt --package quasar --check
       - run: cargo clippy --all-targets
       # The default backend is CPU, so the whole suite -- real forward and
       # backward passes included -- runs on a hosted runner.
       - run: cargo test --all-targets
       - run: cargo run --release -- budget tiny
+      - run: cargo run --release -- budget tiny-turbo
+
+  # Synchronized stepwise kernel A/B plus the production optimizer step on the
+  # maintainer's GPU. One complete step is discarded for fusion/autotune
+  # warm-up; every measured three-step window stays below one minute.
+  gpu-benchmark:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          rocminfo | grep -m1 -E 'Name:.*gfx'
+          rocm-smi --showproductname --showmeminfo vram
+      # One binary isolates the old tensor paths, K4, K4+K1, and the fused
+      # rank-one scan before verifying that the full production batch fits.
+      - name: Vulkan stepwise kernel A/B and production recipe
+        run: examples/state_passing_ab.sh
+      - name: Preserve GPU benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-passing-benchmark-logs
+          path: benchmark-logs/
 
   smoke:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

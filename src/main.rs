@@ -345,16 +345,16 @@ fn sample(
         let text =
             generate::generate(&model, &tokenizer, &ask.prompt, cfg.seq_len, &seeded, &device)?;
         match out {
-            // `text` is the whole document rather than the continuation alone:
-            // a grader parses blueprints, and half of one does not parse.
+            // `text` already holds the prompt as well as the continuation,
+            // which is what a grader needs: half a blueprint parses as none.
             Some(_) => {
                 let mut record = ask.record.clone();
                 record.insert("prompt".into(), ask.prompt.clone().into());
-                record.insert("text".into(), format!("{}{text}", ask.prompt).into());
+                record.insert("text".into(), text.into());
                 lines.push_str(&serde_json::to_string(&record)?);
                 lines.push('\n');
             }
-            None => println!("{}{text}", ask.prompt),
+            None => println!("{text}"),
         }
         bar.inc(1);
     }

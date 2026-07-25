@@ -119,7 +119,17 @@ from quasar_factorio import prototypes, validate  # noqa: E402
 
 data = prototypes.load()
 samples = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line]
-ranked = sorted(samples, key=lambda s: validate.grade(s["text"], data).quality(), reverse=True)
+
+
+def rank(sample):
+    # Quality first, entity count second. A good run has a dozen generations
+    # scoring a flat 1.0, and picking whichever of them came first would put a
+    # six-entity mall cell forward when a 68-entity bus tap scored the same.
+    report = validate.grade(sample["text"], data)
+    return report.quality(), report.entities
+
+
+ranked = sorted(samples, key=rank, reverse=True)
 pathlib.Path(sys.argv[2]).write_text(ranked[0]["text"] if ranked else "")
 PY
 "${harness[@]}" render "$out/best.txt" "$out/best.png" || true

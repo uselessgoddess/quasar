@@ -173,6 +173,8 @@ enum Preset {
     /// `tiny`, cut down to what trains fastest inside 16 GB.
     TinyTurbo,
     Base,
+    /// ~3M, 495-token vocabulary — the Factorio blueprint model.
+    Nano,
     Toy,
 }
 
@@ -305,6 +307,7 @@ impl Preset {
             Self::Tiny => config::Model::tiny(),
             Self::TinyTurbo => config::Model::tiny_turbo(),
             Self::Base => config::Model::base(),
+            Self::Nano => config::Model::nano(),
             Self::Toy => config::Model::toy(),
         }
     }
@@ -315,11 +318,27 @@ impl Preset {
     /// checkpointing on the 16-GB target card. Accumulation rises inversely so
     /// the default token budget is unchanged. Larger presets keep the
     /// memory-saving defaults; callers can still override every path.
+    ///
+    /// `nano` is the other end: at 3M parameters the memory-saving defaults buy
+    /// nothing and cost a third of the throughput, so both come off and the
+    /// batch goes into micro-batch where it runs as one pass. 2,000 steps of
+    /// 16k tokens is about fourteen epochs of the blueprint corpus, which is
+    /// what a run capped at half an hour has room for.
     fn run_defaults(self) -> train::Run {
         match self {
             Self::TinyTurbo => train::Run::new()
                 .with_micro_batch(4)
                 .with_accum(32)
+                .with_checkpointing(false)
+                .with_ssd_mode(Some(config::SsdMode::Serial)),
+            Self::Nano => train::Run::new()
+                .with_steps(2_000)
+                .with_micro_batch(32)
+                .with_accum(1)
+                .with_warmup(100)
+                .with_decay(400)
+                .with_eval_every(100)
+                .with_save_every(500)
                 .with_checkpointing(false)
                 .with_ssd_mode(Some(config::SsdMode::Serial)),
             Self::Tiny | Self::Base | Self::Toy => train::Run::new(),
@@ -382,12 +401,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_tiny_turbo_uses_the_measured_training_defaults() {
+    fn only_the_measured_presets_leave_the_training_defaults() {
         let turbo = Preset::TinyTurbo.run_defaults();
 
         assert_eq!(turbo.ssd_mode, Some(config::SsdMode::Serial));
         assert_eq!((turbo.micro_batch, turbo.accum), (4, 32));
         assert!(!turbo.checkpointing);
+
+        let nano = Preset::Nano.run_defaults();
+
+        assert_eq!(nano.ssd_mode, Some(config::SsdMode::Serial));
+        assert_eq!((nano.micro_batch, nano.accum), (32, 1));
+        assert!(!nano.checkpointing);
+        // The schedule has to fit inside the run it is scheduling.
+        assert!(nano.warmup + nano.decay < nano.steps);
 
         for preset in [Preset::Tiny, Preset::Base, Preset::Toy] {
             let run = preset.run_defaults();
@@ -395,5 +422,19 @@ mod tests {
             assert_eq!((run.micro_batch, run.accum), (8, 16));
             assert!(run.checkpointing);
         }
+    }
+
+    /// The corpus is built against this shape: 495 tokens of vocabulary and
+    /// documents up to 460 long. A mismatch here is caught by `train` as a
+    /// vocab error, but only after the shards have been written.
+    #[test]
+    fn nano_matches_the_blueprint_corpus() {
+        let cfg = Preset::Nano.config();
+
+        assert_eq!(cfg.vocab_size, 495);
+        assert!(cfg.seq_len >= 512);
+        // Every entity already placed constrains the next one, so the window
+        // has to reach back over a whole blueprint rather than a slice of one.
+        assert_eq!(cfg.attn_window, None);
     }
 }

@@ -185,6 +185,35 @@ impl Model {
             .with_tied_embeddings(true)
     }
 
+    /// `quasar-nano`, ~3M — the Factorio blueprint model.
+    ///
+    /// Sized for its corpus rather than scaled down from `tiny`. The vocabulary
+    /// is 495 tokens instead of 32,768, so the embedding costs almost nothing
+    /// and the whole budget goes into the stack; documents top out around 460
+    /// tokens, so `seq_len 512` holds a whole blueprint and there is nothing
+    /// past it worth attending to.
+    ///
+    /// Attention is unwindowed here, which is the one place this disagrees with
+    /// every larger preset. The task is placing entities that must not overlap
+    /// ones already placed, and a 64-entity blueprint is 400 tokens of history
+    /// that all of it depends on: a 128-token window would hide two thirds of
+    /// the design being built. Quadratic attention over 512 tokens at
+    /// `d_model 192` is a rounding error against the SSD scan.
+    pub fn nano() -> Self {
+        Self::new(495, 192, 8)
+            .with_seq_len(512)
+            .with_state_rank(32)
+            .with_head_dim(32)
+            .with_n_groups(1)
+            .with_mimo_rank(1)
+            .with_attn_period(Some(4))
+            .with_attn_heads(6)
+            .with_attn_kv_heads(2)
+            .with_attn_window(None)
+            .with_ffn_mult(2.0)
+            .with_tied_embeddings(true)
+    }
+
     /// A model small enough to train a few steps inside a unit test.
     pub fn toy() -> Self {
         Self::new(64, 32, 4)

@@ -56,16 +56,35 @@ impl Batcher {
         self.gather(&starts, device)
     }
 
+    /// How many whole windows of `seq_len + 1` the corpus holds end to end.
+    ///
+    /// At least one: `new` refuses a corpus shorter than a window.
+    fn windows(&self) -> usize {
+        (self.shards.len() - 1) / self.seq_len
+    }
+
     /// How many non-overlapping evaluation batches the corpus holds.
+    ///
+    /// Rounded up, so a validation split smaller than one full batch still has
+    /// one short batch to give rather than none. A held-out split is sized by
+    /// the corpus, not by `micro_batch`, and rounding down here used to mean a
+    /// small corpus reported nothing to evaluate — which callers then overrode
+    /// back to one batch that did not fit.
     pub fn evals(&self) -> usize {
-        (self.shards.len() - 1) / self.seq_len / self.batch
+        self.windows().div_ceil(self.batch)
     }
 
     /// The `index`-th evaluation batch: contiguous, non-overlapping windows from
     /// the start of the corpus, so every token is predicted exactly once.
+    ///
+    /// The last batch is short when the corpus does not divide evenly. Callers
+    /// weight by the token count they get back, so a short batch costs accuracy
+    /// nothing.
     pub fn eval(&self, index: usize, device: &Device) -> Batch {
-        let starts: Vec<usize> =
-            (0..self.batch).map(|i| (index * self.batch + i) * self.seq_len).collect();
+        let first = index * self.batch;
+        let rows = self.windows().saturating_sub(first).min(self.batch);
+        assert!(rows > 0, "evaluation batch {index} past the {} the corpus holds", self.evals());
+        let starts: Vec<usize> = (0..rows).map(|i| (first + i) * self.seq_len).collect();
         self.gather(&starts, device)
     }
 
@@ -119,6 +138,25 @@ mod tests {
 
         let starts = batch.input.slice([0..2, 0..1]).into_data();
         assert_eq!(starts.to_vec::<i32>().unwrap(), [0, 8]);
+    }
+
+    #[test]
+    fn a_corpus_too_small_for_one_batch_still_has_one_to_give() {
+        // 1188 tokens, `seq_len` 512, `micro_batch` 32 — the shape of a small
+        // held-out split, which used to report zero batches and then be handed
+        // a window starting at 31 * 512.
+        let (_dir, batcher) = batcher(1188, 512, 32);
+
+        assert_eq!(batcher.evals(), 1);
+        assert_eq!(batcher.eval(0, &Device::default()).input.dims(), [2, 512]);
+    }
+
+    #[test]
+    fn the_last_batch_is_short_rather_than_past_the_end() {
+        let (_dir, batcher) = batcher(200, 8, 16);
+
+        assert_eq!(batcher.evals(), 2);
+        assert_eq!(batcher.eval(1, &Device::default()).input.dims(), [8, 8]);
     }
 
     #[test]

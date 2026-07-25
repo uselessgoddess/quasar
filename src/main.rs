@@ -479,6 +479,19 @@ impl Preset {
                     .with_steps(steps)
                     .with_micro_batch(micro)
                     .with_accum(accum)
+                    // Half the shared default, and measured rather than chosen.
+                    // At 3e-3 this preset sits on the edge of stability: of six
+                    // runs on the maintainer's card, the two short ones that
+                    // finished did so with the loss already oscillating, and
+                    // four came apart -- at steps 415, ~600, ~530 and 1704 --
+                    // each with the same signature, a loss that stops falling,
+                    // swings wider over a few hundred steps, and then leaves
+                    // the format. Two of those were the same commit and the
+                    // same corpus as a run that survived, so it is not a
+                    // recipe that fails, it is one that fails half the time,
+                    // and a run twenty times longer than the ones that
+                    // survived does not get to be a coin flip.
+                    .with_lr(1.5e-3)
                     // The preset's own proportions: 5% warmup, 20% decay.
                     .with_warmup(steps / 20)
                     .with_decay(steps / 5)
@@ -563,6 +576,8 @@ mod tests {
         assert!(!nano.checkpointing);
         // The schedule has to fit inside the run it is scheduling.
         assert!(nano.warmup + nano.decay < nano.steps);
+        // And it runs under the shared peak rate, which this preset diverged at.
+        assert!(nano.lr < train::Run::new().lr, "{} is back on the edge", nano.lr);
         // And the run has to be long enough to be worth reading: 20 tokens per
         // parameter, the floor `config::factorio` derives everything from.
         let cfg = Preset::FactorioNano.config();

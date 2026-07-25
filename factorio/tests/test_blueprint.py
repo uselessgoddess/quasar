@@ -36,6 +36,30 @@ def test_centre_positions_convert_to_top_left_tiles():
     assert by_name["transport-belt"].direction == SOUTH
 
 
+def test_a_half_tile_offset_design_keeps_all_of_its_rows():
+    """Factorio 0.15 exported whole designs shifted half a tile.
+
+    A 1x1 belt then sits at an integer position instead of x.5, so its corner
+    lands exactly on .5 and the rounding rule decides whether the design
+    survives. Python's `round` breaks ties towards even, which folds -1.5 and
+    -2.5 onto the same tile — every second row of such a blueprint lands on the
+    one before it and the whole thing reads as a pile of overlaps.
+    """
+    payload = {
+        "entities": [
+            {"name": "transport-belt", "position": {"x": float(x), "y": float(y)}}
+            for y in (-2, -1, 0, 1)
+            for x in (-2, -1, 0, 1)
+        ]
+    }
+
+    got = bp.from_json(payload, DATA)
+
+    assert len(got.entities) == 16
+    assert len({(e.x, e.y) for e in got.entities}) == 16
+    assert got.extent(DATA) == (4, 4)
+
+
 def test_blueprint_string_round_trips():
     original = sample()
     text = bp.to_string(original, DATA, label="test")

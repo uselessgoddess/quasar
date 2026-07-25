@@ -6,7 +6,7 @@ what it did. That is what makes the loop debuggable — every intermediate is
 sitting there to be looked at, and any step can be re-run on its own without
 rebuilding the ones before it.
 
-    quasar-factorio build corpus --count 20000
+    quasar-factorio build corpus --count 20000 --real data/blueprints.jsonl
     quasar-factorio preview corpus/preview.png --count 12
     quasar-factorio heatmap corpus/occupancy.png --count 400
     quasar-factorio grade runs/nano/samples.jsonl --sheet runs/nano/sheet.png
@@ -20,6 +20,7 @@ no colour, no spinner, nothing that survives a pipe into a log file as garbage.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import pathlib
 import random
@@ -61,6 +62,17 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--variants", type=int, default=4, help="forms kept per design")
     build.add_argument("--valid-every", type=int, default=dataset.VALID_EVERY)
     build.add_argument("--prompts", type=int, default=256, help="held-out eval prompts")
+    build.add_argument(
+        "--real",
+        type=pathlib.Path,
+        help="also mix in human blueprints from a cache written by tools/fetch_blueprints.py",
+    )
+    build.add_argument(
+        "--real-limit",
+        type=int,
+        default=0,
+        help="cap the human half; 0 takes everything the cache yields",
+    )
     build.set_defaults(run=_build)
 
     preview = sub.add_parser("preview", help="a contact sheet of graded designs")
@@ -131,12 +143,26 @@ def _source(parser: argparse.ArgumentParser, count: int = 12) -> None:
 
 def _build(args) -> int:
     data = prototypes.load()
+    harvest: collections.Counter[str] = collections.Counter()
+    extra = None
+    if args.real:
+        from . import real
+
+        extra = real.designs(
+            args.real,
+            data=data,
+            limit=args.real_limit,
+            variants=args.variants,
+            seed=args.seed,
+            counts=harvest,
+        )
     stats = dataset.build(
         args.out,
         args.count,
         seed=args.seed,
         variants=args.variants,
         data=data,
+        extra=extra,
         valid_every=args.valid_every,
         prompts=args.prompts,
     )
@@ -158,6 +184,12 @@ def _build(args) -> int:
     total = sum(stats.kinds.values()) or 1
     for kind, seen in sorted(stats.kinds.items(), key=lambda item: -item[1]):
         _bar(kind, seen / total, f"{seen}")
+    if harvest:
+        # What the human half threw away and why. "3,000 designs came in" says
+        # nothing about whether the cache is worth extending; "1,900 were Space
+        # Age" says to fetch a different slice of it.
+        _rule("HARVEST", str(args.real))
+        _rows(sorted(harvest.items(), key=lambda item: -item[1]))
     if stats.rejected:
         # The generators are held to a perfect score by their own tests, so this
         # is a bug in one of them rather than a tolerable loss.

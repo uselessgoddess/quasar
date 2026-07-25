@@ -78,7 +78,7 @@ def test_every_document_a_design_brings_is_one_the_game_would_build(tmp_path):
 
 
 def test_a_book_contributes_every_blueprint_in_it(tmp_path):
-    """A third of the site is books, and the blocks inside them are the point."""
+    """A quarter of the site is books, and the blocks inside them are the point."""
     book = {
         "blueprint_book": {
             "blueprints": [

@@ -12,8 +12,10 @@ published are the only source of layouts nobody wrote a generator for.
 decides what a blueprint has to be to join the corpus. Four things get thrown
 out, in the order that makes the counts readable:
 
-*Strings this harness cannot read.* About a third of the oldest uploads are the
-pre-0.15 gzip format, which `decode_string` refuses on purpose.
+*Strings this harness cannot read.* 185 of the archive's 17,477 records are the
+pre-0.15 gzip format, which `decode_string` refuses on purpose — all of them at
+the oldest end, so a crawl that took only the earliest ids would meet far more
+of them than 1%.
 
 *Designs that are not vanilla 1.1.* The prototype table is 1.1's, so a Space
 Age or modded blueprint arrives as a few recognisable belts around entities

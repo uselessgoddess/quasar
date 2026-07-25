@@ -71,9 +71,9 @@ RETRIES = 4
 BACKOFF = 1.5
 
 # A blueprint string longer than this is a book of a whole base. Books are worth
-# walking — a third of the site is books and they hold the tileable blocks this
-# corpus wants — but past a megabyte the decompression alone costs more than the
-# designs are worth.
+# walking — a quarter of the records are books, seventeen blueprints each, and
+# they hold the tileable blocks this corpus wants — but past a megabyte the
+# decompression alone costs more than the designs are worth.
 MAX_STRING = 1 << 20
 
 

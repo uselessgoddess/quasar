@@ -219,24 +219,32 @@ The cache is not committed — it is other people's work and hundreds of megabyt
 run can cite.
 
 Most of what is uploaded cannot be used, and the counts say which limit does the
-throwing away. From 4,936 cached records, 20,792 blueprints once books are
-walked:
+throwing away. The whole archive is 17,477 records — 185 of them in the pre-0.15
+string format this harness cannot read, all at the oldest end — and 84,611
+blueprints once the books are walked, because a quarter of the records are books
+and a book holds seventeen blueprints on average:
 
 | | |
 | --- | ---: |
-| kept | 3,079 |
-| too many entities (>64) | 7,945 |
-| modded, or 2.0 entities | 5,825 |
-| curved rails | 1,805 |
-| fewer than 4 entities | 1,500 |
-| no entities at all | 377 |
-| graded invalid | 162 |
-| pre-0.15 string format | 156 |
-| larger than 64x64 | 99 |
+| kept | 12,067 |
+| too many entities (>64) | 28,491 |
+| modded, or 2.0 entities | 25,316 |
+| fewer than 4 entities | 8,774 |
+| curved rails | 5,555 |
+| no entities at all | 2,055 |
+| graded invalid | 2,015 |
+| larger than 64x64 | 338 |
 
-15% survives, for 1,581 distinct layouts, 8,237 documents and 1.48M tokens — a
-quarter again on top of the synthetic ceiling, and a quarter that no generator
-was going to invent. The single largest rejection class is size: what people
+14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
+mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. The
+generators top out around 11M tokens and the Chinchilla budget is 70.4M, so
+synthetic-only is seven passes over everything they can say, where the
+data-constrained scaling laws put the point at which repeating stops being
+nearly free at four. 11M + 7.8M is 18.8M unique tokens against the 17.6M that
+four epochs of the budget need: the human half is not a garnish here, it is what
+moves the run from seven epochs to under four.
+
+The single largest rejection class is size: what people
 publish is whole factories, and the grammar addresses a 64x64 tile grid with at
 most 64 entities. Cropping them to fit would be easy and wrong — `augment`
 exists because a corpus containing broken output teaches that broken output is

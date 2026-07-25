@@ -11,8 +11,8 @@ how a measurement quietly stops describing the thing it is measuring.
 
     python factorio/experiments/real_yield.py factorio/data/blueprints.jsonl
 
-On the 4,936-record cache this was written against: 20,792 blueprints walked,
-3,079 designs kept in 1,581 distinct layouts, 8,237 documents, 1.48M tokens.
+On the whole factorioprints archive, 17,477 records: 84,611 blueprints walked,
+12,067 designs kept in 4,716 distinct layouts, 48,126 documents, 7.81M tokens.
 """
 
 from __future__ import annotations

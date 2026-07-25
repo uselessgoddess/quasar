@@ -53,12 +53,13 @@ jobs:
       - run: uv run pytest -q
 
   # The whole blueprint pipeline on the maintainer's card: corpus, training,
-  # generation from every checkpoint, grade and plots. Half an hour is the
-  # budget the run is sized to, and the artifacts are the point of it -- the
-  # metrics board and the contact sheet are what say whether it worked.
+  # generation from every checkpoint, grade and plots. An hour is the budget the
+  # run is sized to -- the training length is the Chinchilla one, 20 tokens per
+  # parameter -- and the artifacts are the point of it: the metrics board and the
+  # contact sheet are what say whether it worked.
   blueprints:
     runs-on: self-hosted
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -71,10 +72,28 @@ jobs:
       # cached build later.
       - name: Check the harness interpreter
         run: python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+      # Human blueprints. `checkout` cleans ignored files, so the crawl would be
+      # repeated every run; the cache is what makes it happen once. The key is
+      # fixed rather than hashed over anything, because a cache of other
+      # people's uploads does not go stale in a way a training run can tell.
+      - name: Cache the blueprint archive
+        uses: actions/cache@v4
+        with:
+          path: factorio/data
+          key: factorio-blueprints-v1-6000
+      # The crawl is somebody else's server, so a failure here degrades the run
+      # to a synthetic corpus rather than failing it. `examples/factorio.sh`
+      # decides by whether the file exists.
+      - name: Fetch what the cache is missing
+        continue-on-error: true
+        run: python3 factorio/tools/fetch_blueprints.py --count 6000
       # `factorio-nano` at micro_batch 32 uses a fraction of the 135
       # micro-batches that fit 16 GiB -- see `budget factorio-nano` -- so this
       # cannot run the card out of memory however long it is left going.
       - name: Corpus, training, generation and grade
+        env:
+          DESIGNS: "20000"
+          PROMPTS: "48"
         run: BACKEND=vulkan examples/factorio.sh runs/nano
       - name: Preserve the run
         if: always()

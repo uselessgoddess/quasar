@@ -2,11 +2,11 @@
 """Collect human-made blueprints from the open web into a local cache.
 
 The generators in `synth.py` saturate: 32,000 draws produce 6,344 distinct
-designs, and six of the ten generators are exhausted by a few hundred. A model
-trained to the Chinchilla budget on that corpus sees each design twenty times
-over, which is where a small model stops learning Factorio and starts learning
-the templates. Real blueprints are the only source of layouts nobody wrote a
-generator for.
+designs, and six of the ten generators are exhausted by a few hundred. That is
+about 11M tokens against a Chinchilla budget of 70.4M — seven passes over
+everything they can say, which is where a small model stops learning Factorio
+and starts learning the templates. Real blueprints are the only source of
+layouts nobody wrote a generator for.
 
 Where they come from
 --------------------

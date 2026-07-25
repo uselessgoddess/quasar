@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # The blueprint model end to end: corpus, training, generation, grade, plots.
 #
-# Written to fit inside half an hour on one 16 GB card and to leave behind
+# Written to fit inside an hour on one 16 GB card and to leave behind
 # everything a person would want to look at afterwards — a preview of what went
 # in, a contact sheet of what came out, and one board with every metric on it.
 #
 #     examples/factorio.sh                    # CPU, whatever backend is default
 #     BACKEND=vulkan examples/factorio.sh     # the real thing
 #     STEPS=2000 DESIGNS=20000 examples/factorio.sh runs/nano
+#     REAL=factorio/data/blueprints.jsonl examples/factorio.sh
 #
 # Every knob is an environment variable because the defaults here are the CI
 # defaults, and CI is the one caller that cannot afford to overrun.
@@ -27,6 +28,16 @@ steps=${STEPS:-}
 # that decides whether the run fits its budget, not the training length.
 prompts=${PROMPTS:-24}
 backend=${BACKEND:-}
+# Human blueprints, if a cache has been fetched — the generators saturate around
+# 6,300 layouts and the Chinchilla budget wants more than that. Absent, the run
+# is synthetic-only and everything else about it is unchanged, which is what
+# keeps this script runnable on a box with no network.
+#
+#     python factorio/tools/fetch_blueprints.py --count 6000
+real=${REAL:-factorio/data/blueprints.jsonl}
+# Designs, not records: the harvest stops as soon as it has this many, so it is
+# the knob that decides how long the corpus stage takes.
+real_limit=${REAL_LIMIT:-6000}
 
 features=()
 [ -n "$backend" ] && features=(--no-default-features --features "$backend")
@@ -49,7 +60,13 @@ stage() {
 
 mkdir -p "$out"
 stage corpus
-"${harness[@]}" build "$corpus" --count "$designs"
+mixture=()
+if [ -f "$real" ]; then
+    mixture=(--real "$real" --real-limit "$real_limit")
+else
+    echo "no blueprint cache at $real; synthetic corpus only" >&2
+fi
+"${harness[@]}" build "$corpus" --count "$designs" "${mixture[@]}"
 "${harness[@]}" preview "$out/corpus.png" --corpus "$corpus" --count 12
 "${harness[@]}" heatmap "$out/occupancy.png" --count 400
 

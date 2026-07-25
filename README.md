@@ -139,8 +139,10 @@ samples — the whole pipeline in under a minute on a CPU.
 
 [`factorio/`](factorio/README.md) is a harness that trains `factorio-nano` to build
 Factorio blueprints instead of text: a synthetic corpus with the game's real
-sizes and recipes, a grammar a blueprint round-trips through, a grader that says
-whether a generated design would power up, and a metrics board. The whole run —
+sizes and recipes — plus, once the generators run out of things to say, human
+blueprints fetched from factorioprints and held to the same grader — a grammar a
+blueprint round-trips through, a grader that says whether a generated design
+would power up, and a metrics board. The whole run —
 corpus, training, sampling from every checkpoint, grading, plots — is one
 script, and it takes nine minutes on the same card the language presets are
 sized for.

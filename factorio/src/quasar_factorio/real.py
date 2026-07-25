@@ -2,9 +2,10 @@
 
 The generators saturate. 32,000 draws through `synth.sample` produce 6,344
 distinct layouts, and six of the ten generators are exhausted by a few hundred
-— a lab block has 56 forms and a mining outpost 44. Trained to the Chinchilla
-budget, `factorio-nano` would see each of those layouts twenty times over,
-which teaches it the templates rather than the game. Blueprints people
+— a lab block has 56 forms and a mining outpost 44. That ceiling is about 11M
+tokens, and the Chinchilla budget for `factorio-nano` is 70.4M: seven passes
+over everything the generators can say, when data-constrained scaling laws put
+the point where repeating stops being nearly free at four. Blueprints people
 published are the only source of layouts nobody wrote a generator for.
 
 `tools/fetch_blueprints.py` writes the cache; this module is the half that

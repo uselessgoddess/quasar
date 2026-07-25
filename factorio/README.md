@@ -77,11 +77,13 @@ BACKEND=vulkan examples/factorio.sh runs/nano
 ```
 
 That is what CI runs on the maintainer's card, and it is sized to finish inside
-half an hour: it builds the corpus, previews it, trains, generates from *every*
-checkpoint the run wrote, grades the newest, draws the board and leaves a
-blueprint string behind. `STEPS`, `DESIGNS` and `PROMPTS` are the knobs;
-`PROMPTS` is the one that decides the wall clock, because sampling is the
-expensive half.
+an hour: it builds the corpus, previews it, trains for the Chinchilla length the
+preset carries, generates from *every* checkpoint the run wrote, grades the
+newest, draws the board and leaves a blueprint string behind. `STEPS`, `DESIGNS`
+and `PROMPTS` are the knobs; `PROMPTS` is the one that decides the wall clock,
+because sampling is the expensive half. `REAL` points at a cache of human
+blueprints and is used if the file is there — no cache, synthetic corpus, same
+run otherwise.
 
 Underneath it is a sequence of commands that each stand on their own:
 
@@ -152,13 +154,105 @@ collides, and the manifest says by how much. The 6,000 draws
 `examples/factorio.sh` defaults to give 2,439 layouts and 3.17M tokens, already
 more than a 3.5M-parameter model gets through in half an hour.
 
-The corpus is entirely synthetic, and nothing here fetches from the network:
-what a run trains on has to be reproducible from a seed and a pinned
-`prototypes.json`. Human blueprints — factorioprints.com and the like — are
-still the obvious source of the variety a generator does not invent, so
-`dataset.build` takes an `extra` iterator of `Design`s that is deduplicated,
-graded and split by exactly the rules the drawn ones are. Scraping into it is a
-script that does not exist yet, not a change to the pipeline.
+### Where the generators run out
+
+Raising `--count` past that stops helping, and `experiments/saturation.py` says
+where. 3,200 draws from each of the ten generators — 32,000 in all — yield 6,344
+distinct layouts between them:
+
+| generator | 200 draws | 800 | 3200 | distinct per draw |
+| --- | ---: | ---: | ---: | ---: |
+| belt-lane | 192 | 730 | 2684 | 84% |
+| bus-tap | 183 | 592 | 1400 | 44% |
+| assembler-row | 181 | 540 | 1021 | 32% |
+| mall-cell | 168 | 404 | 551 | 17% |
+| solar-block | 125 | 210 | 216 | 7% |
+| balancer | 109 | 176 | 184 | 6% |
+| oil-block | 99 | 119 | 120 | 4% |
+| smelter-column | 59 | 67 | 68 | 2% |
+| lab-block | 53 | 56 | 56 | 2% |
+| mining-outpost | 37 | 43 | 44 | 1% |
+
+Six of the ten are finished by their four-hundredth draw. A mining outpost has
+44 forms in total, a lab block 56 — every further draw is one of those again.
+Only the belt lane still climbs, and a belt lane is the least interesting thing
+in the corpus: its parameter space is large precisely because nothing constrains
+it. So the synthetic ceiling is roughly 6,300 layouts, about 11M tokens.
+
+That is the number the training budget has to be read against. `factorio-nano`
+is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens —
+nearly seven epochs over everything the generators can produce, and nine over
+what a 20,000-draw build contains. Data-constrained scaling laws put the point
+where repeating stops being nearly free at about four epochs, which means a
+Chinchilla-budget run needs ~17.6M *unique* tokens and the generators cannot get
+there alone. More variety, not more draws.
+
+### Human blueprints
+
+So `dataset.build` takes an `extra` iterator of `Design`s, and `real.py` fills it
+from blueprints people published. They are deduplicated, graded and split by
+exactly the rules the drawn ones are — same `validate.grade`, same symmetries,
+same canonical layout key — so this is an addition to the mixture rather than a
+second pipeline.
+
+```sh
+python factorio/tools/fetch_blueprints.py --count 6000       # cache, resumable
+python -m quasar_factorio.cli build corpus --count 20000 \
+    --real factorio/data/blueprints.jsonl
+```
+
+There is no ready-made dataset to download. The Hugging Face hub has eight
+Factorio datasets and not one of them is blueprint strings: the closest,
+`piebro/factorio-blueprint-visualizations`, is under a thousand PNG renders for
+text-to-image work (CC0), and the rest are wiki text, forum posts and save-file
+metadata. So the source is `factorioprints.com`, which is a Firebase app with a
+public read API — `blueprintSummaries.json?shallow=true` lists 17,780 ids and
+`blueprints/<id>.json` returns one record, which is why the fetcher is a hundred
+lines rather than a scraper. (`factorio.school` hosts a second collection; its
+API answered 502 for the whole of this work, so it is named in the fetcher's
+docstring rather than implemented.) Ids are Firebase push keys, so they sort by
+upload date, and `--order spread` takes an even stride across the whole archive:
+a prefix would be all 0.15, a suffix all Space Age.
+
+The cache is not committed — it is other people's work and hundreds of megabytes
+— so `data/` is gitignored and a manifest with the sha256 of the file is what a
+run can cite.
+
+Most of what is uploaded cannot be used, and the counts say which limit does the
+throwing away. From 4,936 cached records, 20,792 blueprints once books are
+walked:
+
+| | |
+| --- | ---: |
+| kept | 3,079 |
+| too many entities (>64) | 7,945 |
+| modded, or 2.0 entities | 5,825 |
+| curved rails | 1,805 |
+| fewer than 4 entities | 1,500 |
+| no entities at all | 377 |
+| graded invalid | 162 |
+| pre-0.15 string format | 156 |
+| larger than 64x64 | 99 |
+
+15% survives, for 1,581 distinct layouts, 8,237 documents and 1.48M tokens — a
+quarter again on top of the synthetic ceiling, and a quarter that no generator
+was going to invent. The single largest rejection class is size: what people
+publish is whole factories, and the grammar addresses a 64x64 tile grid with at
+most 64 entities. Cropping them to fit would be easy and wrong — `augment`
+exists because a corpus containing broken output teaches that broken output is
+sometimes correct, and a truncated blueprint is exactly that.
+
+Two more rules are worth stating because they are the ones that would quietly
+poison the corpus if relaxed. A blueprint is kept only if 90% of its entities
+exist in the 1.1 prototype table, rather than keeping whichever entities are
+recognised: a Space Age design imported entity-by-entity arrives as a handful of
+belts around holes, and every hole is a lesson. And curved rails are refused
+outright — their footprint is not a rectangle, so the tile model genuinely
+cannot represent them and every overlap check involving one is wrong in both
+directions.
+
+`experiments/real_yield.py` prints that whole table for any cache, through
+`real.designs` itself rather than a copy of the filter.
 
 ## How output is judged
 

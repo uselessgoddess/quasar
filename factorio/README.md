@@ -141,8 +141,13 @@ loss would then be measuring memorisation. Whole designs move together,
 augmentations and all, and "the same design" is decided by a canonical form that
 sees through rotation, reflection and belt tier.
 
-A 20,000-design build produces roughly 1,950 distinct layouts, 12,200 documents
-and 2.3M training tokens at a 495-token vocabulary.
+A 20,000-draw build measures 4,408 distinct layouts, 38,405 documents and 7.46M
+training tokens at a 495-token vocabulary. The other 15,592 draws were forms of
+a layout already kept, and 41,595 of the expanded documents came out
+byte-identical to one already written — drawing at random from ten generators
+collides, and the manifest says by how much. The 6,000 draws
+`examples/factorio.sh` defaults to give 2,439 layouts and 3.17M tokens, already
+more than a 3.5M-parameter model gets through in half an hour.
 
 ## How output is judged
 

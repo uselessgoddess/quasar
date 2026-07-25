@@ -3,11 +3,13 @@
 A Mamba-3 language model family trained end to end on one consumer GPU, in Rust
 on [burn](https://github.com/tracel-ai/burn) + wgpu.
 
-Three presets, all hybrid stacks of Mamba-3 blocks with a sliding-window GQA
-layer every fifth, sixth or seventh position:
+Four presets, all hybrid stacks of Mamba-3 blocks with a GQA layer every fourth
+to seventh position — sliding-window everywhere except `nano`, whose context is
+one whole blueprint and has nothing to slide over:
 
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
+| `nano` | 3.5M | 8.1M | 0.05 GiB | 0.12 GiB | 135 |
 | `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
 | `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
@@ -131,6 +133,20 @@ examples/smoke.sh
 
 Fits a tokenizer, shards a synthetic corpus, trains 50 steps, evaluates and
 samples — the whole pipeline in under a minute on a CPU.
+
+## Factorio blueprints
+
+[`factorio/`](factorio/README.md) is a harness that trains `nano` to build
+Factorio blueprints instead of text: a synthetic corpus with the game's real
+sizes and recipes, a grammar a blueprint round-trips through, a grader that says
+whether a generated design would power up, and a metrics board. The whole run —
+corpus, training, sampling from every checkpoint, grading, plots — is one
+script, and it takes twelve minutes on the same card the language presets are
+sized for.
+
+```sh
+BACKEND=vulkan examples/factorio.sh runs/nano
+```
 
 ## Development
 

@@ -17,10 +17,15 @@ would put a smelter column in `train` and its mirror image in `valid`, and the
 validation loss would then measure memorisation. Whole designs move together,
 augmentations and all — and "the same design" is decided by
 `augment.canonical`, which sees through rotation, reflection and belt tier.
+
+The corollary is that a repeated layout is *merged* into the design already
+kept rather than dropped, because the same layout under a different spec is a
+different thing to learn. See `build`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import random
@@ -53,7 +58,10 @@ class Design:
 class Stats:
     designs: int = 0
     documents: int = 0
-    #: Draws discarded as another form of a design already kept.
+    #: Draws that turned out to be another form of a design already kept. Their
+    #: documents are merged into it rather than dropped; see `build`.
+    repeats: int = 0
+    #: Documents discarded as byte-identical to one already written.
     duplicates: int = 0
     rejected: int = 0
     train_docs: int = 0
@@ -107,6 +115,11 @@ def build(
     `extra` is where scraped human blueprints join the mixture; they arrive as
     `Design`s so they are deduplicated, graded and split by exactly the same
     rules the synthetic ones are.
+
+    Deduplication is by *document*, and the split is by *layout*: a draw whose
+    layout has been seen before contributes whatever documents are new to the
+    side that layout already sits on. Nothing a generator says twice is written
+    twice, and nothing it says once is thrown away for resembling something.
     """
     data = data or load()
     out.mkdir(parents=True, exist_ok=True)
@@ -116,26 +129,40 @@ def build(
     train = shards.Writer(out / "train", len(encoder), encoder.eos)
     valid = shards.Writer(out / "valid", len(encoder), encoder.eos)
     stats = Stats(vocab_size=len(encoder))
-    keys: set[str] = set()
+    sides: dict[str, bool] = {}
+    seen: set[bytes] = set()
     held: list[Design] = []
 
     stream = designs(count, seed=seed, data=data, variants=variants)
     for design in _chain(stream, extra):
         # Two draws that differ only by a turn, a flip or a belt tier are one
-        # design; keeping both would put one in each split. See
+        # design; splitting them apart would put one in each split. See
         # `augment.canonical`.
         key = augment.canonical(design.blueprint, data)
-        if key in keys:
-            stats.duplicates += 1
-            continue
-        keys.add(key)
-        stats.designs += 1
-        stats.kinds[design.kind] = stats.kinds.get(design.kind, 0) + 1
-        # Whole design to one side or the other; see the module docstring.
-        holdout = (stats.designs - 1) % valid_every == 0
+        if key in sides:
+            # Merged, not dropped. A smelter column for copper has the same
+            # layout as one for iron and so the same key, but a different
+            # prompt — and `r:` is the conditioning signal the model is
+            # supposed to learn. Discarding the second one would teach it that
+            # the requested product does not matter. It goes to whichever side
+            # the layout is already on, which is what keeps the split honest.
+            stats.repeats += 1
+            holdout = sides[key]
+        else:
+            stats.designs += 1
+            stats.kinds[design.kind] = stats.kinds.get(design.kind, 0) + 1
+            # Whole design to one side or the other; see the module docstring.
+            holdout = sides[key] = (stats.designs - 1) % valid_every == 0
         if holdout:
             held.append(design)
         for text in dict.fromkeys(design.documents):
+            # Hashed rather than kept: a 20k-design corpus is 80k documents,
+            # and the texts themselves are the largest thing in the process.
+            digest = hashlib.blake2b(text.encode(), digest_size=16).digest()
+            if digest in seen:
+                stats.duplicates += 1
+                continue
+            seen.add(digest)
             if not validate.grade(text, data).valid:
                 stats.rejected += 1
                 continue

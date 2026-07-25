@@ -282,14 +282,21 @@ def smelter_column(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     count = rng.randint(3, 12 if pitch == 2 else 9)
     width = count * pitch
     out_row = 2 + depth
+    # Plates onto a belt, or into a chest per furnace. The chest version is what
+    # a starter base looks like before the bus exists, and it is the only thing
+    # that varies the output row, so it doubles what this template can say.
+    output = rng.choice(("belt", *CHESTS))
 
     canvas.line(belt, 0, 0, width, EAST)
-    canvas.line(belt, 0, out_row + 1, width, EAST)
+    if output == "belt":
+        canvas.line(belt, 0, out_row + 1, width, EAST)
     for index in range(count):
         x = index * pitch
         canvas.place(furnace, x, 2)
         canvas.place(inserter, x, 1, SOUTH)
         canvas.place(inserter, x, out_row, SOUTH)
+        if output != "belt":
+            canvas.place(output, x, out_row + 1)
     for x in range(1, width, 2 * pitch):
         canvas.maybe("medium-electric-pole", x, 1)
 
@@ -320,14 +327,18 @@ def assembler_row(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
 
     count = rng.randint(2, 9)
     width = count * 3
+    output = rng.choice(("belt", "belt", *CHESTS))
 
     canvas.line(belt, 0, 0, width, EAST)
-    canvas.line(belt, 0, 6, width, EAST)
+    if output == "belt":
+        canvas.line(belt, 0, 6, width, EAST)
     for index in range(count):
         x = index * 3
         canvas.place(machine, x, 2, recipe=recipe)
         canvas.place(inserter, x, 1, SOUTH)
         canvas.place(inserter, x, 5, SOUTH)
+        if output != "belt":
+            canvas.place(output, x, 6)
     for x in range(1, width, 6):
         canvas.maybe("medium-electric-pole", x, 1)
 
@@ -347,12 +358,23 @@ def mall_cell(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     machine = ASSEMBLERS[max(tier, 1)]
     inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
     recipe = rng.choice(_makeable(data, machine))
+    # Fed by a belt or from a chest, unloading onto a belt or into a chest: all
+    # four combinations are cells people actually build, and the cell is small
+    # enough that the feed is most of what there is to vary.
+    feed = rng.choice(("belt", *CHESTS[: tier + 2]))
+    output = rng.choice(("belt", *CHESTS[: tier + 2]))
 
-    canvas.line(BELTS[tier], 0, 0, 3, EAST)
+    if feed == "belt":
+        canvas.line(BELTS[tier], 0, 0, 3, EAST)
+    else:
+        canvas.place(feed, 0, 0)
     canvas.place(inserter, 0, 1, SOUTH)
     canvas.place(machine, 0, 2, recipe=recipe)
     canvas.place(inserter, 0, 5, SOUTH)
-    canvas.place(rng.choice(CHESTS[: tier + 2]), 0, 6)
+    if output == "belt":
+        canvas.line(BELTS[tier], 0, 6, 3, EAST)
+    else:
+        canvas.place(output, 0, 6)
     canvas.maybe("medium-electric-pole", 2, 1)
 
     blueprint = canvas.build(recipe)
@@ -360,64 +382,107 @@ def mall_cell(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
 
 
 def mining_outpost(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
-    """Two facing rows of drills unloading onto a shared belt.
+    """Rows of drills unloading onto a shared belt.
 
-    Drills are 3x3 and drop onto the tile they face, so both rows point at the
-    belt between them. Every third column trades its upper drill for a medium
-    pole: nine tiles apart is exactly the medium pole's wire reach, and its 7x7
+    Drills drop onto the tile they face, so a two-row outpost points both rows
+    at the belt between them. The pitch is the drill's own width: an electric
+    drill is 3x3 and a burner one 2x2, and the burner variant is a real
+    early-game outpost rather than a downgrade — it needs no poles at all,
+    which is worth having in a corpus where every other template is wired.
+
+    For the electric drill, every third column trades its upper drill for a
+    medium pole: nine tiles apart is exactly the pole's wire reach, and its 7x7
     supply from that slot still touches the drill row on the far side of the
     belt, so one pole line powers both rows.
     """
     canvas = Canvas.new(data)
     tier = _tier(rng)
     belt = BELTS[tier]
-    # A multiple of three: the pole slot is every third column, so any other
-    # count leaves a tail of drills past the last pole with nothing to power them.
-    columns = 3 * rng.randint(1, 4)
-    width = columns * 3
+    drill = rng.choice(("electric-mining-drill", "electric-mining-drill", "burner-mining-drill"))
+    burner = drill == "burner-mining-drill"
+    pitch = data.entities[drill].width
+    rows = rng.choice((1, 2, 2))
+    # A multiple of three where poles are involved: the pole slot is every third
+    # column, so any other count leaves a tail of drills past the last pole with
+    # nothing to power them. A burner outpost has no such constraint. The
+    # divisor is the entity budget — one belt tile per column of pitch, plus a
+    # drill per row — kept under `COUNT_MAX` with room for the poles.
+    step = 1 if burner else 3
+    columns = rng.randint(1, 60 // (pitch + rows) // step) * step
+    width = columns * pitch
 
-    canvas.line(belt, 0, 3, width, EAST)
+    canvas.line(belt, 0, pitch if rows == 2 else 0, width, EAST)
     for index in range(columns):
-        x = index * 3
-        if index % 3 == 1:
+        x = index * pitch
+        # The pole replaces a drill rather than joining one: the row is solid,
+        # so there is no spare tile to put it in.
+        pole = not burner and index % 3 == 1
+        if rows == 1:
+            if pole:
+                canvas.place("medium-electric-pole", x + 1, 2)
+            else:
+                canvas.place(drill, x, 1, NORTH)
+            continue
+        if pole:
             canvas.place("medium-electric-pole", x + 1, 1)
         else:
-            canvas.place("electric-mining-drill", x, 0, SOUTH)
-        canvas.place("electric-mining-drill", x, 4, NORTH)
+            canvas.place(drill, x, 0, SOUTH)
+        canvas.place(drill, x, pitch + 1, NORTH)
 
-    drills = sum(1 for e in canvas.entities if e.name == "electric-mining-drill")
+    drills = sum(1 for entity in canvas.entities if entity.name == drill)
     blueprint = canvas.build(f"{drills} drills")
     return _oriented(blueprint, rng, data, "mining-outpost", None)
 
 
+#: Labs fed from a belt, or from a chest per lab. Both are things people build:
+#: the belt is the early-game answer and the chest the logistic-network one.
+LAB_FEEDS = ("belt", "logistic-chest-requester", "logistic-chest-buffer", "steel-chest")
+
+#: Longest lab row each shape affords before the entity count runs out. A belt
+#: costs one entity per tile, so belt-fed rows are much shorter than chest-fed
+#: ones, and a second row of labs roughly halves both.
+LAB_LIMITS = {(True, 1): 8, (True, 2): 5, (False, 1): 11, (False, 2): 6}
+
+
 def lab_block(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
-    """A lab row with pass-through inserters and a science belt above.
+    """One or two lab rows with pass-through inserters and science above.
 
     Labs hand science along the row, so the inserters between them face east —
-    each takes from the lab behind it and inserts into the lab ahead.
+    each takes from the lab behind it and inserts into the lab ahead. Where
+    there are two rows, the inserters between them face south for the same
+    reason: the second row is fed by the first, not by a second belt.
     """
     canvas = Canvas.new(data)
     tier = _tier(rng)
     inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
-    count = rng.randint(2, 8)
+    feed = rng.choice(LAB_FEEDS)
+    rows = rng.choice((1, 1, 2))
+    count = rng.randint(2, LAB_LIMITS[feed == "belt", rows])
     pitch = 4
     width = count * pitch - 1
 
-    canvas.line(BELTS[tier], 0, 0, width, EAST)
+    if feed == "belt":
+        canvas.line(BELTS[tier], 0, 0, width, EAST)
     for index in range(count):
         x = index * pitch
-        canvas.place("lab", x, 2)
+        if feed != "belt":
+            canvas.place(feed, x, 0)
         canvas.place(inserter, x, 1, SOUTH)
-        if index:
-            canvas.place(inserter, x - 1, 3, EAST)
+        for row in range(rows):
+            canvas.place("lab", x, 2 + row * 4)
+            if index:
+                canvas.place(inserter, x - 1, 3 + row * 4, EAST)
+            if row:
+                canvas.place(inserter, x, 1 + row * 4, SOUTH)
     # One pole per pair of labs, in the free column between them, and never past
     # the last lab: a pole hanging off the end would stretch the bounding box
     # beyond the belt, leaving the belt's head pointing at an empty tile that is
-    # suddenly *inside* the design.
+    # suddenly *inside* the design. With two rows the pole line moves down to
+    # the inserter row between them, where one 7x7 supply covers both.
     for gap in sorted({min(index, count - 2) for index in range(0, count, 2)}):
-        canvas.maybe("medium-electric-pole", gap * pitch + 3, 1)
+        canvas.maybe("medium-electric-pole", gap * pitch + 3, 1 if rows == 1 else 5)
 
-    blueprint = canvas.build(f"{count} labs")
+    blueprint = canvas.build(f"{count * rows} labs")
     return _oriented(blueprint, rng, data, "lab-block", None)
 
 
@@ -425,16 +490,28 @@ def solar_block(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     """Solar panels with an accumulator strip, in roughly the vanilla ratio.
 
     The exact ratio is 23.8 panels to 20.8 accumulators; a block of panel
-    columns with one accumulator column per three panel columns lands near
-    enough, and the point of the example is the tiling, not the power balance.
+    columns with one accumulator column per three or four panel columns lands
+    near enough, and the point of the example is the tiling, not the power
+    balance.
+
+    This is the one template where the pole choice is free rather than
+    load-bearing — nothing here consumes power — so it draws from all three,
+    which is also what real solar fields look like.
     """
     canvas = Canvas.new(data)
-    columns = rng.randint(2, 6)
-    rows = rng.randint(2, 5)
+    pole = rng.choice(("medium-electric-pole", "big-electric-pole", "substation"))
+    ratio = rng.choice((3, 4))
+    columns = rng.randint(2, 8)
+    rows = rng.randint(2, 8)
+    # A panel column is `rows` entities and an accumulator column half again as
+    # many, so a wide field has to be short to stay inside `COUNT_MAX`.
+    while columns * rows * 5 // 4 > 56:
+        rows -= 1
+
     x = 0
     panels = 0
     for column in range(columns):
-        if column and column % 3 == 0:
+        if column and column % ratio == 0:
             for row in range(rows * 3 // 2):
                 canvas.place("accumulator", x, row * 2)
             x += 2
@@ -444,29 +521,44 @@ def solar_block(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
             panels += 1
         x += 3
     for row in range(0, rows * 3, 6):
-        canvas.maybe("medium-electric-pole", x, row)
+        canvas.maybe(pole, x, row)
 
     blueprint = canvas.build(f"{panels} panels")
     return _oriented(blueprint, rng, data, "solar-block", None)
 
 
 def balancer(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
-    """A 2-to-2 or 4-to-4 balancer, built from splitter stages.
+    """An n-to-n balancer, built from splitter stages.
 
     Splitters are 2x1 facing north/south and 1x2 facing east/west; the belts
     between stages make the wiring legible to a model that only sees tiles.
+
+    Lane counts, stage counts and the belt runs between stages all vary, which
+    is the only reason this template contributes more than a handful of designs
+    to the corpus: rotating a balancer produces a blueprint the corpus builder
+    already has, so every distinct example has to come from geometry.
     """
     canvas = Canvas.new(data)
     tier = _tier(rng)
     belt, split = BELTS[tier], SPLITTERS[tier]
-    lanes = rng.choice((2, 4))
-    stages = 1 if lanes == 2 else rng.choice((2, 3))
-    run = 2
+    lanes = rng.choice((2, 2, 3, 4, 4, 6, 8))
+    stages = rng.randint(1, 3)
+    lead, run = rng.randint(1, 4), rng.randint(1, 4)
+    # Every tile of every lane is one entity, so a wide balancer has to be
+    # short. Shrinking the runs rather than the lane count keeps the shape the
+    # draw asked for; `#N` tops out at COUNT_MAX and the grader is unforgiving.
+    while lanes * (lead + stages * (1 + run)) > 60:
+        if run > 1:
+            run -= 1
+        elif lead > 1:
+            lead -= 1
+        else:
+            stages -= 1
 
     x = 0
     for lane in range(lanes):
-        canvas.line(belt, x, lane, run, EAST)
-    x += run
+        canvas.line(belt, x, lane, lead, EAST)
+    x += lead
     for stage in range(stages):
         # Alternating the offset is what makes a balancer balance: stage 0 pairs
         # lanes (0,1) and (2,3), stage 1 pairs (1,2), and every lane reaches
@@ -507,15 +599,31 @@ def oil_block(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     recipe = rng.choice(craftable or ["plastic-bar"])
     count = rng.randint(2, 7)
     width = count * 3
+    buried = rng.random() < 0.5
+    # A tank on the head of the header is what the fluid actually arrives from,
+    # and it is the only 3x3 non-crafting building in the corpus.
+    left = 4 if rng.random() < 0.5 else 0
 
-    for x in range(width):
-        canvas.place("pipe", x, 0)
+    if left:
+        canvas.place("storage-tank", 0, 0)
+    for x in range(left, left + width):
+        # Every third tile is where a plant's fluid box meets the header, so
+        # those stay above ground and the spans between them duck under —
+        # which is how a header is built once undergrounds are affordable.
+        if not buried or (x - left) % 3 == 1:
+            canvas.place("pipe", x, 0)
+        elif (x - left) % 3 == 2:
+            canvas.place("pipe-to-ground", x, 0, EAST)
+        elif x - left:
+            canvas.place("pipe-to-ground", x, 0, WEST)
+    if left:
+        canvas.place("pipe", left - 1, 0)
     for index in range(count):
-        canvas.place(machine, index * 3, 1, recipe=recipe)
-    for index in range(count):
-        canvas.place(INSERTERS[min(tier + 1, len(INSERTERS) - 1)], index * 3, 4, SOUTH)
-    canvas.line(BELTS[tier], 0, 5, width, EAST)
-    for x in range(1, width, 6):
+        x = left + index * 3
+        canvas.place(machine, x, 1, recipe=recipe)
+        canvas.place(INSERTERS[min(tier + 1, len(INSERTERS) - 1)], x, 4, SOUTH)
+    canvas.line(BELTS[tier], left, 5, width, EAST)
+    for x in range(left + 1, left + width, 6):
         canvas.maybe("medium-electric-pole", x, 4)
 
     blueprint = canvas.build(f"{count}x {recipe}")

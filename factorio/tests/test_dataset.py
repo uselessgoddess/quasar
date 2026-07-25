@@ -1,10 +1,12 @@
 """Corpus assembly: what actually lands on disk for the GPU to read."""
 
 import json
+import random
+from dataclasses import replace
 
 import pytest
 
-from quasar_factorio import augment, dataset, grammar, prototypes, shards, tokenizer
+from quasar_factorio import augment, dataset, grammar, prototypes, shards, synth, tokenizer
 
 DATA = prototypes.load()
 
@@ -115,11 +117,52 @@ def test_extra_designs_join_the_mixture(tmp_path):
     """Where scraped human blueprints will arrive, held to the same rules."""
     extra = list(dataset.designs(6, seed=99, data=DATA))
     stats = dataset.build(tmp_path, 4, seed=0, variants=1, extra=iter(extra), data=DATA)
-    assert stats.designs + stats.duplicates == 10
+    assert stats.designs + stats.repeats == 10
     assert stats.designs > 4  # the extras are not silently dropped
 
 
 def test_a_design_offered_twice_is_only_written_once(tmp_path):
     twice = list(dataset.designs(3, seed=11, data=DATA)) * 2
     stats = dataset.build(tmp_path, 0, variants=2, extra=iter(twice), data=DATA)
-    assert (stats.designs, stats.duplicates) == (3, 3)
+    assert (stats.designs, stats.repeats) == (3, 3)
+    # Every document of the second pass is byte-identical to one of the first.
+    assert stats.duplicates == stats.documents
+
+
+def test_a_repeated_layout_keeps_the_documents_that_are_new(tmp_path):
+    """The case the merge exists for: same layout, different spec.
+
+    A smelter column for copper is the iron one with one token changed, so
+    `augment.canonical` calls them one design — but the prompt differs, and
+    `r:` is the whole conditioning signal. Dropping the second would teach the
+    model that the requested product does not constrain the answer.
+    """
+    blueprint, spec = synth.GENERATORS["smelter-column"](random.Random(0), DATA)
+    # A furnace carries no recipe token, so the product lives only in the spec —
+    # which is exactly why the two documents share a canonical key.
+    assert spec.product in {"iron-plate", "copper-plate", "steel-plate", "stone-brick"}
+
+    def design(product):
+        made = replace(spec, product=product)
+        return dataset.Design(
+            kind=made.kind,
+            blueprint=blueprint,
+            spec=made,
+            documents=[grammar.serialise(blueprint, DATA, made)],
+        )
+
+    iron, copper = design("iron-plate"), design("stone-brick")
+    assert iron.documents != copper.documents  # only the spec line differs
+
+    stats = dataset.build(tmp_path, 0, extra=iter([iron, copper]), data=DATA)
+    assert (stats.designs, stats.repeats, stats.duplicates, stats.rejected) == (1, 1, 0, 0)
+    assert stats.documents == 2
+
+
+def test_a_repeated_layout_does_not_straddle_the_split(tmp_path):
+    """Merged documents follow the layout, so neither split can learn the other."""
+    held = next(iter(dataset.designs(1, seed=5, data=DATA)))
+    stats = dataset.build(tmp_path, 0, extra=iter([held, held, held]), data=DATA)
+    # Design 0 is always the held-out one, and the repeats have to follow it.
+    assert (stats.train_docs, stats.designs, stats.repeats) == (0, 1, 2)
+    assert stats.valid_docs > 0

@@ -1,0 +1,379 @@
+"""One command for every step between "no corpus" and "look at what it built".
+
+The commands are deliberately small and file-based rather than a pipeline
+object: each one reads something off disk, writes something to disk, and prints
+what it did. That is what makes the loop debuggable — every intermediate is
+sitting there to be looked at, and any step can be re-run on its own without
+rebuilding the ones before it.
+
+    quasar-factorio build corpus --count 20000
+    quasar-factorio preview corpus/preview.png --count 12
+    quasar-factorio heatmap corpus/occupancy.png --count 400
+    quasar-factorio grade runs/nano/samples.jsonl --sheet runs/nano/sheet.png
+    quasar-factorio export sample.txt
+
+Printing is brutalist for the same reason the renderer is: fixed-width columns,
+no colour, no spinner, nothing that survives a pipe into a log file as garbage.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import random
+import sys
+from collections.abc import Iterator, Sequence
+
+from . import blueprint as bp
+from . import dataset, grammar, prototypes, render, synth, validate
+
+# Rule width for the printed tables. 72 so that two of them fit side by side in
+# a 150-column terminal and neither wraps in an 80-column one.
+RULE = 72
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "run"):
+        parser.print_help()
+        return 2
+    try:
+        return args.run(args)
+    except (OSError, ValueError, bp.BlueprintError, grammar.ParseError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="quasar-factorio",
+        description="Build, look at and grade a Factorio blueprint corpus.",
+    )
+    sub = parser.add_subparsers()
+
+    build = sub.add_parser("build", help="write a corpus quasar train can read")
+    build.add_argument("out", type=pathlib.Path)
+    build.add_argument("--count", type=int, default=20_000, help="designs to draw")
+    build.add_argument("--seed", type=int, default=0)
+    build.add_argument("--variants", type=int, default=4, help="forms kept per design")
+    build.add_argument("--valid-every", type=int, default=dataset.VALID_EVERY)
+    build.add_argument("--prompts", type=int, default=256, help="held-out eval prompts")
+    build.set_defaults(run=_build)
+
+    preview = sub.add_parser("preview", help="a contact sheet of graded designs")
+    preview.add_argument("out", type=pathlib.Path)
+    _source(preview)
+    preview.add_argument("--columns", type=int, default=4)
+    preview.set_defaults(run=_preview)
+
+    heat = sub.add_parser("heatmap", help="where entities land, over many designs")
+    heat.add_argument("out", type=pathlib.Path)
+    _source(heat, count=400)
+    heat.add_argument("--scale", type=int, default=8)
+    heat.set_defaults(run=_heatmap)
+
+    grade = sub.add_parser("grade", help="score generations the way the game would")
+    grade.add_argument("samples", type=pathlib.Path, help="jsonl, or - for stdin")
+    grade.add_argument("--sheet", type=pathlib.Path, help="also draw a contact sheet")
+    grade.add_argument("--json", type=pathlib.Path, help="also write the summary as json")
+    grade.add_argument("--columns", type=int, default=4)
+    grade.add_argument("--worst", action="store_true", help="show the failures, not the best")
+    grade.set_defaults(run=_grade)
+
+    draw = sub.add_parser("render", help="draw one document, by suffix: .png or .svg")
+    draw.add_argument("document", type=pathlib.Path, help="a text file, or - for stdin")
+    draw.add_argument("out", type=pathlib.Path)
+    draw.add_argument("--scale", type=int, default=16)
+    draw.set_defaults(run=_render)
+
+    export = sub.add_parser("export", help="a blueprint string to paste into the game")
+    export.add_argument("document", type=pathlib.Path, help="a text file, or - for stdin")
+    export.add_argument("--label", default="")
+    export.set_defaults(run=_export)
+
+    return parser
+
+
+def _source(parser: argparse.ArgumentParser, count: int = 12) -> None:
+    """Where blueprints come from: a built corpus, or freshly drawn ones."""
+    parser.add_argument("--corpus", type=pathlib.Path, help="read from a built corpus instead")
+    parser.add_argument("--split", default="train", choices=("train", "valid"))
+    parser.add_argument("--count", type=int, default=count)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--kind", help="only this generator")
+
+
+# --- commands --------------------------------------------------------------
+
+
+def _build(args) -> int:
+    data = prototypes.load()
+    stats = dataset.build(
+        args.out,
+        args.count,
+        seed=args.seed,
+        variants=args.variants,
+        data=data,
+        valid_every=args.valid_every,
+        prompts=args.prompts,
+    )
+    _rule("CORPUS", str(args.out))
+    _rows(
+        [
+            ("distinct layouts", stats.designs),
+            ("documents", stats.documents),
+            ("layouts redrawn", stats.repeats),
+            ("duplicates dropped", stats.duplicates),
+            ("rejected", stats.rejected),
+            ("train tokens", stats.train_tokens),
+            ("valid tokens", stats.valid_tokens),
+            ("vocab", stats.vocab_size),
+            ("longest document", stats.longest),
+        ]
+    )
+    _rule("MIXTURE")
+    total = sum(stats.kinds.values()) or 1
+    for kind, seen in sorted(stats.kinds.items(), key=lambda item: -item[1]):
+        _bar(kind, seen / total, f"{seen}")
+    if stats.rejected:
+        # The generators are held to a perfect score by their own tests, so this
+        # is a bug in one of them rather than a tolerable loss.
+        print(f"\nWARNING: {stats.rejected} documents failed the grader and were dropped")
+    return 0
+
+
+def _preview(args) -> int:
+    data = prototypes.load()
+    cards = []
+    for label, text, blueprint in _blueprints(args, data):
+        report = validate.grade(text, data)
+        cards.append(
+            render.card(
+                blueprint,
+                data,
+                title=label,
+                lines=_caption(report),
+                accent=render.GOOD if report.valid else render.ALERT,
+            )
+        )
+    if not cards:
+        raise ValueError("nothing to preview")
+    _write(args.out, render.sheet(cards, columns=args.columns).png())
+    print(f"{len(cards)} designs -> {args.out}")
+    return 0
+
+
+def _heatmap(args) -> int:
+    data = prototypes.load()
+    blueprints = [blueprint for _, _, blueprint in _blueprints(args, data)]
+    counts = render.occupancy(blueprints, data)
+    title = f"OCCUPANCY {len(blueprints)} DESIGNS"
+    _write(args.out, render.heatmap(counts, scale=args.scale, title=title).png())
+    print(f"{len(blueprints)} designs -> {args.out}")
+    return 0
+
+
+def _grade(args) -> int:
+    data = prototypes.load()
+    samples = list(_samples(args.samples))
+    if not samples:
+        raise ValueError(f"no samples in {args.samples}")
+    reports = [(sample, validate.grade(sample["text"], data)) for sample in samples]
+    summary = validate.summarise([report for _, report in reports])
+
+    _rule("GRADE", str(args.samples))
+    _rows([("samples", summary.samples)])
+    for name, value in [
+        ("parses", summary.parse_rate),
+        ("valid", summary.valid_rate),
+        ("spec honoured", summary.spec_rate),
+        ("powered", summary.mean_powered),
+        ("inserters connected", summary.mean_connected),
+        ("belts lead somewhere", summary.mean_belts),
+        ("quality", summary.mean_quality),
+    ]:
+        _bar(name, value, f"{value:.3f}")
+    _rows([("mean entities", f"{summary.mean_entities:.1f}")])
+
+    if summary.errors:
+        _rule("WHY IT FAILED")
+        worst = max(summary.errors.values())
+        for message, seen in summary.errors.items():
+            _bar(message[:32], seen / worst, f"{seen}")
+
+    if args.json:
+        _write(args.json, (json.dumps(summary.to_dict(), indent=2) + "\n").encode())
+    if args.sheet:
+        _sheet(args.sheet, reports, data, columns=args.columns, worst=args.worst)
+        print(f"\n{args.sheet}")
+    return 0
+
+
+def _render(args) -> int:
+    data = prototypes.load()
+    text = _read(args.document)
+    blueprint, spec = grammar.parse(text, data)
+    report = validate.grade(text, data)
+    title = spec.kind.upper() if spec else "BLUEPRINT"
+    if args.out.suffix == ".svg":
+        _write(
+            args.out,
+            render.svg(
+                blueprint, data, scale=args.scale, title=title, lines=_caption(report)
+            ).encode(),
+        )
+    else:
+        accent = render.GOOD if report.valid else render.ALERT
+        card = render.card(blueprint, data, title=title, lines=_caption(report), accent=accent)
+        _write(args.out, card.png())
+    print(f"{report.entities} entities, {report.width}x{report.height} -> {args.out}")
+    return 0
+
+
+def _export(args) -> int:
+    """The end of the whole pipeline: something to paste into the game.
+
+    Printed to stdout on its own line, so `quasar-factorio export x.txt | xclip`
+    does the obvious thing.
+    """
+    data = prototypes.load()
+    blueprint, spec = grammar.parse(_read(args.document), data)
+    label = args.label or (spec.kind if spec else "")
+    print(bp.to_string(blueprint, data, label=label))
+    return 0
+
+
+# --- shared plumbing -------------------------------------------------------
+
+
+def _blueprints(args, data) -> Iterator[tuple[str, str, bp.Blueprint]]:
+    """`(label, document, blueprint)` from a corpus or from the generators."""
+    if args.corpus:
+        yield from _from_corpus(args.corpus / args.split, args.count, data, args.kind)
+        return
+    for index in range(args.count):
+        rng = random.Random(args.seed * 1_000_003 + index)
+        if args.kind:
+            blueprint, spec = synth.GENERATORS[args.kind](rng, data)
+        else:
+            blueprint, spec = synth.sample(rng, data)
+        yield spec.kind, grammar.serialise(blueprint, data, spec), blueprint
+
+
+def _from_corpus(directory, count, data, kind) -> Iterator[tuple[str, str, bp.Blueprint]]:
+    from . import shards, tokenizer
+
+    encoder = tokenizer.Encoder(data)
+    tokens, meta = shards.read(directory)
+    seen = 0
+    for ids in shards.documents(tokens, meta.eos):
+        text = encoder.decode(ids)
+        blueprint, spec = grammar.parse(text, data)
+        if kind and (spec is None or spec.kind != kind):
+            continue
+        yield (spec.kind if spec else "?"), text, blueprint
+        seen += 1
+        if seen >= count:
+            return
+
+
+def _samples(path: pathlib.Path) -> Iterator[dict]:
+    """Generations, from jsonl or from a plain file of one document per line.
+
+    Tolerant on purpose: this reads whatever the sampler happened to write, and
+    a run that produced 500 samples should not be unreadable because the field
+    was called `completion` rather than `text`.
+    """
+    for line in _read(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            yield {"text": line}
+            continue
+        record = json.loads(line)
+        for field in ("text", "completion", "generation", "sample", "output"):
+            if field in record:
+                yield {**record, "text": record[field]}
+                break
+        else:
+            raise ValueError(f"no generated text in {sorted(record)}")
+
+
+def _sheet(out, reports, data, *, columns: int, worst: bool) -> None:
+    """A contact sheet of the generations, best or worst first.
+
+    Sorted rather than sampled: the interesting frames of a training run are the
+    extremes, and a random twelve from five hundred shows neither.
+    """
+    ranked = sorted(reports, key=lambda item: (item[1].valid, item[1].quality()), reverse=not worst)
+    cards = []
+    for sample, report in ranked[: columns * 3]:
+        # Unknown entities are dropped by the renderer, which is exactly the case
+        # worth looking at, so parse failures still get a card where they can.
+        try:
+            blueprint, _ = grammar.parse(sample["text"], data)
+        except grammar.ParseError:
+            blueprint = bp.Blueprint(entities=[])
+        cards.append(
+            render.card(
+                blueprint,
+                data,
+                title=sample.get("kind", report.spec_kind or "SAMPLE"),
+                lines=_caption(report),
+                accent=render.GOOD if report.valid else render.ALERT,
+            )
+        )
+    _write(out, render.sheet(cards, columns=columns).png())
+
+
+def _caption(report: validate.Report) -> list[str]:
+    """Two lines of grader verdict, which is all a card has room for."""
+    if not report.parsed:
+        return [f"PARSE FAIL AT {report.error_at}", report.error[:38].upper()]
+    head = "VALID" if report.valid else "INVALID"
+    if report.overlaps:
+        head += f" OVERLAP {report.overlaps}"
+    elif not report.fits:
+        head += " OFF GRID"
+    elif report.illegal_recipes:
+        head += f" BAD RECIPE {report.illegal_recipes}"
+    return [
+        f"{head}  {report.entities} ENT  {report.width}X{report.height}",
+        f"PWR {report.powered:.2f}  INS {report.connected_inserters:.2f}"
+        f"  BLT {report.belts_lead_somewhere:.2f}",
+    ]
+
+
+def _read(path: pathlib.Path) -> str:
+    return sys.stdin.read() if str(path) == "-" else path.read_text()
+
+
+def _write(path: pathlib.Path, blob: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+
+
+def _rule(title: str, note: str = "") -> None:
+    head = f"== {title} "
+    if note:
+        head += f"[{note}] "
+    print(f"\n{head}{'=' * max(0, RULE - len(head))}")
+
+
+def _rows(rows) -> None:
+    for name, value in rows:
+        print(f"{name:<24}{value:>12}")
+
+
+def _bar(name: str, fraction: float, value: str) -> None:
+    """A fraction as a bar, because a column of decimals hides the shape."""
+    width = RULE - 24 - 8
+    filled = max(0, min(width, round(fraction * width)))
+    print(f"{name[:23]:<24}{'#' * filled}{'.' * (width - filled)}{value:>8}")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

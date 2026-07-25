@@ -212,8 +212,9 @@ def _spread(every: list[str], count: int) -> list[str]:
     """An even stride across the whole site, then the rest behind it.
 
     A capped crawl that takes a prefix takes one era: the oldest end is 0.15,
-    where a third of the strings predate the format this harness reads, and the
-    newest end is Space Age, whose entities are not in the 1.1 prototype table.
+    where the 185 strings in the pre-0.15 format this harness cannot read all
+    live, and the newest end is Space Age, whose entities are not in the 1.1
+    prototype table.
     A stride samples every year the site has been up, so raising `--count` later
     keeps everything already cached and fills in between it.
     """

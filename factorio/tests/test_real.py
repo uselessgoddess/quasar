@@ -197,7 +197,7 @@ def test_a_recipe_nobody_has_heard_of_costs_the_hint_not_the_design(tmp_path):
 
 
 def test_an_unreadable_string_is_counted_rather_than_raised(tmp_path):
-    """A third of the oldest uploads predate the format `decode_string` reads."""
+    """185 of the archive's records predate the format `decode_string` reads."""
     path = cache(tmp_path, "H4sIAAAAAAAA/6tWKkstKlayUrBSMDIwMjIwMDA0MDAyMA==")
 
     counts = collections.Counter()

@@ -94,6 +94,12 @@ jobs:
         env:
           DESIGNS: "20000"
           PROMPTS: "48"
+          # Parameter scales every 25 steps. A run that comes apart is the one
+          # thing the artifacts cannot explain after the fact -- the checkpoint
+          # is all NaN, so it says nothing about which tensor went first -- and
+          # 172 device syncs across a quarter-hour run is not a cost worth
+          # weighing against that.
+          QUASAR_TRACE_NORMS: "25"
         run: BACKEND=vulkan examples/factorio.sh runs/nano
       - name: Preserve the run
         if: always()

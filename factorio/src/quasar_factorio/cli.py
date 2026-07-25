@@ -189,8 +189,8 @@ def _preview(args) -> int:
 def _heatmap(args) -> int:
     data = prototypes.load()
     blueprints = [blueprint for _, _, blueprint in _blueprints(args, data)]
-    counts = render.occupancy(blueprints, data)
-    title = f"OCCUPANCY {len(blueprints)} DESIGNS"
+    counts = render.trim(render.occupancy(blueprints, data))
+    title = f"OCCUPANCY {len(blueprints)} DESIGNS {len(counts[0])}X{len(counts)}"
     _write(args.out, render.heatmap(counts, scale=args.scale, title=title).png())
     print(f"{len(blueprints)} designs -> {args.out}")
     return 0

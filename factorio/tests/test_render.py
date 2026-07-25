@@ -267,6 +267,17 @@ def test_occupancy_ignores_an_entity_it_cannot_place():
     assert sum(sum(row) for row in counts) == 0
 
 
+def test_trim_crops_to_what_was_built_on():
+    counts = [[0, 0, 0, 0], [0, 1, 2, 0], [0, 0, 3, 0], [0, 0, 0, 0]]
+    assert render.trim(counts) == [[1, 2], [0, 3]]
+
+
+def test_trim_leaves_an_empty_grid_alone_rather_than_returning_nothing():
+    # A heatmap over zero designs still has to draw: a raster of no width is a
+    # crash, and an empty square says "nothing here" perfectly well.
+    assert render.trim([[0, 0], [0, 0]]) == [[0, 0], [0, 0]]
+
+
 def test_the_heatmap_bands_are_monotone_in_the_count():
     counts = [[0, 1, 4], [8, 16, 32]]
     canvas = render.heatmap(counts, scale=4, title="T")

@@ -376,6 +376,25 @@ def occupancy(blueprints: Iterable[Blueprint], data: Data | None = None) -> list
     return counts
 
 
+def trim(counts: Sequence[Sequence[int]]) -> list[list[int]]:
+    """The occupied part of an occupancy grid, without the empty margin.
+
+    Designs are anchored at the origin and almost all of them are far smaller
+    than the 64x64 grid they are placed on, so a full-grid heatmap spends three
+    quarters of its pixels on ground nothing was ever built on. Cropping to the
+    bounding box of the non-zero tiles keeps the shape and the aspect ratio and
+    puts the pixels where the signal is. An empty grid is returned unchanged —
+    there is no bounding box to crop to, and a zero-sized raster is worse than
+    an honest empty one.
+    """
+    rows = [y for y, row in enumerate(counts) if any(row)]
+    if not rows:
+        return [list(row) for row in counts]
+    width = max(len(row) for row in counts)
+    columns = [x for x in range(width) if any(x < len(row) and row[x] for row in counts)]
+    return [list(row[columns[0] : columns[-1] + 1]) for row in counts[rows[0] : rows[-1] + 1]]
+
+
 def heatmap(
     counts: Sequence[Sequence[int]],
     *,

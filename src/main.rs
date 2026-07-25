@@ -135,6 +135,10 @@ struct Overrides {
     save_every: Option<usize>,
     #[arg(long)]
     eval_every: Option<usize>,
+    /// Steps between the loss/throughput lines on stdout. Those lines are what
+    /// the metric plots are drawn from, so a short run wants a short interval.
+    #[arg(long)]
+    log_every: Option<usize>,
     /// Muon on the hidden matrices; `false` puts everything on AdamW.
     #[arg(long)]
     muon: Option<bool>,
@@ -405,12 +409,24 @@ fn asks(path: &Path) -> Result<Vec<Ask>> {
     Ok(asked)
 }
 
-/// The config and newest checkpoint of a run directory.
+/// The config and a checkpoint of a run.
+///
+/// `run` is either the run directory, which resolves to its newest checkpoint,
+/// or one checkpoint inside it, which is taken as given. The second form is
+/// what scoring a run over time needs: the interesting question is not only
+/// what the finished model builds but what it was building at step 200, and
+/// that is a directory the run already wrote.
 fn trained(run: &Path) -> Result<(config::Model, PathBuf)> {
-    let cfg = config::Model::load(run.join("model.json"))
-        .with_context(|| format!("no model.json in {}", run.display()))?;
-    let dir =
-        checkpoint::latest(run).with_context(|| format!("no checkpoint in {}", run.display()))?;
+    let (root, dir) = match run.join("state.json").is_file() {
+        true => (run.parent().unwrap_or(run).to_path_buf(), run.to_path_buf()),
+        false => (
+            run.to_path_buf(),
+            checkpoint::latest(run)
+                .with_context(|| format!("no checkpoint in {}", run.display()))?,
+        ),
+    };
+    let cfg = config::Model::load(root.join("model.json"))
+        .with_context(|| format!("no model.json in {}", root.display()))?;
     println!("{}", dir.display());
     Ok((cfg, dir))
 }
@@ -496,6 +512,7 @@ impl Overrides {
             seed,
             save_every,
             eval_every,
+            log_every,
             muon,
             checkpointing
         );
@@ -565,6 +582,26 @@ mod tests {
         fs::write(&path, "\n \n").unwrap();
 
         assert!(asks(&path).is_err());
+    }
+
+    #[test]
+    fn a_run_resolves_to_its_newest_checkpoint_and_a_checkpoint_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path();
+        config::Model::toy().save(run.join("model.json")).unwrap();
+        for step in [10usize, 200] {
+            let at = checkpoint::dir(run, step);
+            fs::create_dir_all(&at).unwrap();
+            fs::write(at.join("state.json"), "{\"step\": 0, \"tokens\": 0}").unwrap();
+        }
+
+        let (_, newest) = trained(run).unwrap();
+        let (_, asked) = trained(&checkpoint::dir(run, 10)).unwrap();
+
+        assert_eq!(newest, checkpoint::dir(run, 200));
+        // Scoring a run over time depends on this: `model.json` lives in the
+        // run directory, not in the checkpoint that was named.
+        assert_eq!(asked, checkpoint::dir(run, 10));
     }
 
     /// The corpus is built against this shape: 495 tokens of vocabulary and

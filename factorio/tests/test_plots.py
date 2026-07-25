@@ -73,10 +73,27 @@ def test_the_final_line_does_not_duplicate_the_last_evaluation():
     assert run.final == 2.0839
 
 
-def test_validation_is_attributed_to_the_step_it_was_measured_at():
+def test_validation_in_an_older_log_is_attributed_to_the_step_before_it():
+    """`SMOKE` and `LONGER` predate the step being printed on the valid line."""
     run = plots.read_training(LONGER)
     assert [step for step, _ in run.valid] == [0.0, 100.0, 300.0, 400.0]
     assert [step for step, _ in run.loss] == [100.0, 200.0, 300.0, 400.0]
+
+
+def test_validation_takes_the_step_off_its_own_line_when_the_line_has_one():
+    """Attribution is a fallback: a run that logs no training lines — a short
+    one, or one whose `log_every` is longer than it is — would otherwise pile
+    every evaluation onto step zero and plot a vertical bar."""
+    run = plots.read_training(
+        "training plan: 6 optimizer steps | 0.00B tokens | 16384 tokens/step\n"
+        "  valid: step 0 | loss 5.7971 | ppl 329.34 | bpb 1.2055 | 1024 tokens\n"
+        "  valid: step 3 | loss 4.1777 | ppl 65.22 | bpb 0.8688 | 1024 tokens\n"
+        "  valid: step 6 | loss 3.6799 | ppl 39.64 | bpb 0.7652 | 1024 tokens\n"
+        "final: step 6 | loss 3.6799 | ppl 39.64 | bpb 0.7652 | 1024 tokens\n"
+    )
+    assert run.valid == [(0.0, 5.7971), (3.0, 4.1777), (6.0, 3.6799)]
+    assert [step for step, _ in run.perplexity] == [0.0, 3.0, 6.0]
+    assert run.loss == []
 
 
 def test_a_log_with_nothing_in_it_parses_to_nothing_rather_than_failing():

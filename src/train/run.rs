@@ -203,7 +203,11 @@ pub fn run(
             let report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
             dashboard.valid(report);
             if !dashboard.active() {
-                println!("  valid: {report}");
+                // The step is on the line because the line is plotted: read
+                // back later, a validation point that has to be attributed to
+                // whichever training line came before it is a point that lands
+                // at zero whenever training logged nothing.
+                println!("  valid: step {} | {report}", state.step);
             }
         }
         if due(step, run.save_every) {
@@ -218,7 +222,7 @@ pub fn run(
     let final_report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
     dashboard.valid(final_report);
     dashboard.finish();
-    println!("final: {final_report}");
+    println!("final: step {} | {final_report}", state.step);
     Ok(())
 }
 

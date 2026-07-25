@@ -87,7 +87,8 @@ _STEP = re.compile(
     r"lr (?P<lr>[\d.e+-]+) \| (?P<throughput>[\d]+) tok/s \| (?P<tflops>[\d.]+) TFLOP/s"
 )
 _VALID = re.compile(
-    r"(?:valid|final): loss (?P<loss>[\d.]+) \| ppl (?P<ppl>[\d.]+) \| bpb (?P<bpb>[\d.]+)"
+    r"(?:valid|final): (?:step (?P<step>\d+) \| )?"
+    r"loss (?P<loss>[\d.]+) \| ppl (?P<ppl>[\d.]+) \| bpb (?P<bpb>[\d.]+)"
 )
 _PLAN = re.compile(r"training plan: (?P<plan>.+)")
 
@@ -95,10 +96,11 @@ _PLAN = re.compile(r"training plan: (?P<plan>.+)")
 def read_training(text: str) -> Training:
     """Parse `quasar train` stdout.
 
-    A `valid:` line carries no step of its own, so it is attributed to the last
-    training step seen — which is where it was measured. The evaluation printed
-    before the first training line lands at step 0, and that one is worth
-    keeping: it is the only untrained score in the run.
+    A `valid:` line states the step it was measured at. Logs written before it
+    did not, and those are still read: the evaluation is attributed to the last
+    training step seen, which is where it happened. Either way the evaluation
+    printed before the first training step lands at step 0, and that one is
+    worth keeping — it is the only untrained score in the run.
     """
     run = Training()
     step = 0.0
@@ -115,14 +117,15 @@ def read_training(text: str) -> Training:
             run.tflops.append((step, float(found["tflops"])))
             continue
         if found := _VALID.search(line):
+            at = float(found["step"]) if found["step"] else step
             # `final:` repeats the last evaluation; keeping both would draw a
             # flat tail onto the end of every curve.
-            point = (step, float(found["loss"]))
+            point = (at, float(found["loss"]))
             if run.valid and run.valid[-1] == point:
                 continue
             run.valid.append(point)
-            run.perplexity.append((step, float(found["ppl"])))
-            run.bits_per_byte.append((step, float(found["bpb"])))
+            run.perplexity.append((at, float(found["ppl"])))
+            run.bits_per_byte.append((at, float(found["bpb"])))
     return run
 
 

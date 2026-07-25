@@ -141,7 +141,7 @@ Factorio blueprints instead of text: a synthetic corpus with the game's real
 sizes and recipes, a grammar a blueprint round-trips through, a grader that says
 whether a generated design would power up, and a metrics board. The whole run —
 corpus, training, sampling from every checkpoint, grading, plots — is one
-script, and it takes twelve minutes on the same card the language presets are
+script, and it takes nine minutes on the same card the language presets are
 sized for.
 
 ```sh

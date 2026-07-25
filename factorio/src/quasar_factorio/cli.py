@@ -80,7 +80,13 @@ def _parser() -> argparse.ArgumentParser:
     grade.add_argument("--sheet", type=pathlib.Path, help="also draw a contact sheet")
     grade.add_argument("--json", type=pathlib.Path, help="also write the summary as json")
     grade.add_argument("--columns", type=int, default=4)
-    grade.add_argument("--worst", action="store_true", help="show the failures, not the best")
+    grade.add_argument(
+        "--order",
+        choices=("best", "worst", "given"),
+        default="best",
+        help="sheet order; `given` keeps the prompt order, which is what makes "
+        "one sheet per checkpoint comparable frame to frame",
+    )
     grade.set_defaults(run=_grade)
 
     plot = sub.add_parser("plot", help="metric panels from a training log")
@@ -221,7 +227,7 @@ def _grade(args) -> int:
     if args.json:
         _write(args.json, (json.dumps(summary.to_dict(), indent=2) + "\n").encode())
     if args.sheet:
-        _sheet(args.sheet, reports, data, columns=args.columns, worst=args.worst)
+        _sheet(args.sheet, reports, data, columns=args.columns, order=args.order)
         print(f"\n{args.sheet}")
     return 0
 
@@ -398,13 +404,22 @@ def _samples(path: pathlib.Path) -> Iterator[dict]:
             raise ValueError(f"no generated text in {sorted(record)}")
 
 
-def _sheet(out, reports, data, *, columns: int, worst: bool) -> None:
-    """A contact sheet of the generations, best or worst first.
+def _sheet(out, reports, data, *, columns: int, order: str) -> None:
+    """A contact sheet of the generations.
 
-    Sorted rather than sampled: the interesting frames of a training run are the
-    extremes, and a random twelve from five hundred shows neither.
+    Sorted rather than sampled by default: the interesting frames of a training
+    run are the extremes, and a random twelve from five hundred shows neither.
+    `given` is the exception — a timelapse needs the same prompt in the same
+    cell in every frame, or the whole sheet reshuffles between checkpoints and
+    nothing can be followed.
     """
-    ranked = sorted(reports, key=lambda item: (item[1].valid, item[1].quality()), reverse=not worst)
+
+    def rank(item):
+        return (item[1].valid, item[1].quality())
+
+    ranked = reports
+    if order != "given":
+        ranked = sorted(reports, key=rank, reverse=order == "best")
     cards = []
     for sample, report in ranked[: columns * 3]:
         # Unknown entities are dropped by the renderer, which is exactly the case

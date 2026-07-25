@@ -67,6 +67,21 @@ crafting times are traceable to the game rather than to somebody's memory of it.
 
 ## Pipeline
 
+All of it, end to end, is one script:
+
+```sh
+BACKEND=vulkan examples/factorio.sh runs/nano
+```
+
+That is what CI runs on the maintainer's card, and it is sized to finish inside
+half an hour: it builds the corpus, previews it, trains, generates from *every*
+checkpoint the run wrote, grades the newest, draws the board and leaves a
+blueprint string behind. `STEPS`, `DESIGNS` and `PROMPTS` are the knobs;
+`PROMPTS` is the one that decides the wall clock, because sampling is the
+expensive half.
+
+Underneath it is a sequence of commands that each stand on their own:
+
 ```sh
 # a corpus quasar train can read: shards, tokenizer, held-out prompts
 python -m quasar_factorio.cli build corpus --count 20000
@@ -79,10 +94,12 @@ python -m quasar_factorio.cli heatmap corpus/occupancy.png --count 400
 cargo run --release --no-default-features --features vulkan -- \
     train nano --data corpus --out runs/nano 2>&1 | tee runs/nano/train.log
 
-# generate against the specs it was never trained on
-cargo run --release --features vulkan -- generate runs/nano \
+# generate against the specs it was never trained on. Naming a checkpoint
+# rather than the run samples the model as it was at that step, which is what
+# the grade-over-training panel and the timelapse frames are made of.
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --tokenizer corpus/tokenizer.json \
-    --prompts corpus/prompts.jsonl --out runs/nano/samples.jsonl --tokens 460
+    --prompts corpus/prompts.jsonl --out runs/nano/samples-000400.jsonl --tokens 460
 
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
@@ -148,6 +165,17 @@ the contact sheet is sorted by score rather than sampled, because the
 interesting frames of a training run are the extremes and a random twelve from
 five hundred shows neither.
 
+`--order given` is the exception. It keeps the sheet in prompt order, which
+makes one sheet per checkpoint into a timelapse: the same specification stays in
+the same cell while the model gets better at satisfying it. `examples/factorio.sh`
+writes those into `frames/`, and any of
+
+```sh
+ffmpeg -framerate 4 -pattern_type glob -i 'runs/nano/frames/*.png' training.mp4
+```
+
+turns them into the video.
+
 ## Looking at it
 
 The renderer has no textures on purpose. Entity footprints are exact, colours
@@ -167,9 +195,13 @@ runs that happened before the plotting code did.
 ## Development
 
 ```sh
-ruff check . && ruff format --check .
-pytest
+uv run ruff check . && uv run ruff format --check .
+uv run pytest
 ```
+
+`uv` installs a linter and a test runner and nothing else — the package itself
+still has no runtime dependencies, and `[dependency-groups]` in `pyproject.toml`
+is the whole of it. CI runs exactly those three commands.
 
 The suite is fast and has no GPU in it. `experiments/saturation.py` measures how
 many distinct designs the generators can actually produce before they start

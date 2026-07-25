@@ -156,6 +156,37 @@ def test_a_generation_that_is_not_a_blueprint_is_graded_not_crashed_on(tmp_path,
     assert "WHY IT FAILED" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("order", ["best", "worst", "given"])
+def test_the_sheet_can_be_ordered_three_ways_and_given_keeps_the_prompt_order(
+    document, tmp_path, order
+):
+    """`given` is what makes one sheet per checkpoint into a timelapse: sorted
+    frames reshuffle between checkpoints and nothing can be followed."""
+    good, bad = document.read_text(), "<bp> not a blueprint </bp>"
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text("".join(json.dumps({"text": t}) + "\n" for t in (bad, good)))
+
+    sheet = tmp_path / f"{order}.png"
+    assert main(["grade", str(samples), "--sheet", str(sheet), "--order", order]) == 0
+    assert sheet.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_the_sheet_order_changes_which_design_lands_in_the_first_cell(document, tmp_path):
+    good, bad = document.read_text(), "<bp> not a blueprint </bp>"
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text("".join(json.dumps({"text": t}) + "\n" for t in (bad, good)))
+
+    drawn = {}
+    for order in ("best", "worst", "given"):
+        sheet = tmp_path / f"{order}.png"
+        assert main(["grade", str(samples), "--sheet", str(sheet), "--order", order]) == 0
+        drawn[order] = sheet.read_bytes()
+
+    # `given` put the failure first, as the file did; `best` put the design there.
+    assert drawn["given"] == drawn["worst"]
+    assert drawn["best"] != drawn["given"]
+
+
 def test_grading_an_empty_file_says_so(tmp_path, capsys):
     empty = tmp_path / "empty.jsonl"
     empty.write_text("\n\n")

@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use burn::module::AutodiffModule;
 use burn::prelude::*;
+use burn::store::ModuleSnapshot;
 
 use crate::data::{Batcher, Shards};
 use crate::model::Quasar;
@@ -89,6 +90,18 @@ pub enum Error {
         config: usize,
         shards: usize,
     },
+    /// The loss stopped being a number.
+    ///
+    /// A diverged run is not a worse run, it is not a run: one NaN reaches
+    /// every weight within a step, every sample afterwards is empty, and the
+    /// grade sheet at the end reports a flat zero that reads exactly like a
+    /// model which learnt nothing. That is how a four-thousand-step run
+    /// finished green with a dead model in it. The loss is already read on
+    /// logging steps, so noticing costs nothing until it fires.
+    Diverged {
+        step: usize,
+        params: Vec<String>,
+    },
 }
 
 /// Train `cfg` on the shards under `data`, checkpointing into `out`.
@@ -142,6 +155,7 @@ pub fn run(
         per_step
     );
     let mut dashboard = Dashboard::new(run.steps, state.step);
+    let tracing = trace_every();
 
     #[cfg(feature = "gpu")]
     if !dashboard.active() {
@@ -184,6 +198,9 @@ pub fn run(
                 .expect("a logging step contains at least one micro-batch")
                 .div_scalar(run.accum as f64)
                 .into_scalar::<f32>() as f64;
+            if !window.loss.is_finite() {
+                return Err(Error::Diverged { step: state.step, params: nonfinite(&model) });
+            }
             let report = window.report(state, run, lr, per_step, cfg.flops_per_token());
             dashboard.train(
                 state.step,
@@ -199,11 +216,21 @@ pub fn run(
             }
             window = Window::new();
         }
+        // Its own cadence rather than the logging one: a divergence is bounded
+        // by two readings, and `log_every` is a sixtieth of the run — seventy
+        // steps in which a scale can leave the format entirely.
+        if due(step, tracing) {
+            println!("  norms: step {} | {}", state.step, norms(&model));
+        }
         if due(step, run.eval_every) {
             let report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
             dashboard.valid(report);
             if !dashboard.active() {
-                println!("  valid: {report}");
+                // The step is on the line because the line is plotted: read
+                // back later, a validation point that has to be attributed to
+                // whichever training line came before it is a point that lands
+                // at zero whenever training logged nothing.
+                println!("  valid: step {} | {report}", state.step);
             }
         }
         if due(step, run.save_every) {
@@ -218,8 +245,69 @@ pub fn run(
     let final_report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
     dashboard.valid(final_report);
     dashboard.finish();
-    println!("final: {final_report}");
+    println!("final: step {} | {final_report}", state.step);
     Ok(())
+}
+
+/// Every parameter of `model` that holds something which is not a number.
+///
+/// Reading the weights back is a device sync and a full copy, which is why this
+/// runs once, on the way out of a run that has already failed.
+fn nonfinite(model: &Quasar) -> Vec<String> {
+    model
+        .collect(None, None, false)
+        .iter()
+        .filter(|tensor| match tensor.to_data() {
+            Ok(data) => data.iter::<f32>().any(|value| !value.is_finite()),
+            // A tensor that cannot be read back cannot be cleared either, and
+            // the run is being abandoned regardless.
+            Err(_) => true,
+        })
+        .map(|tensor| tensor.full_path())
+        .collect()
+}
+
+/// The four parameters with the largest RMS, largest first.
+///
+/// Divergence has a shape before it has a NaN: one tensor's scale climbs for a
+/// few hundred steps and then leaves the range of the format. Printing the top
+/// of that list as the run goes is what tells the difference between the
+/// optimizer and the objective afterwards.
+fn norms(model: &Quasar) -> String {
+    let mut scales: Vec<(String, f32)> = model
+        .collect(None, None, false)
+        .iter()
+        .filter_map(|tensor| {
+            let data = tensor.to_data().ok()?;
+            let (count, total) = data
+                .iter::<f32>()
+                .fold((0usize, 0f64), |(n, sum), v| (n + 1, sum + (v as f64) * (v as f64)));
+            let rms = (total / count.max(1) as f64).sqrt() as f32;
+            Some((tensor.full_path(), rms))
+        })
+        .collect();
+    scales.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scales
+        .iter()
+        .take(4)
+        .map(|(path, rms)| format!("{path} {rms:.3}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// How often to print [`norms`], in steps. Zero — the default — is never.
+///
+/// `QUASAR_TRACE_NORMS=10` traces every tenth step. It lives in the environment
+/// rather than the run file because it is not part of the experiment: it is a
+/// device sync and a full parameter read per traced step, which is exactly what
+/// the loop is written to avoid, and it is wanted only after a run has already
+/// misbehaved once. Anything unparseable reads as `1`, so a bare `=yes` traces
+/// every step rather than silently doing nothing.
+fn trace_every() -> usize {
+    match std::env::var("QUASAR_TRACE_NORMS") {
+        Err(_) => 0,
+        Ok(value) => value.trim().parse().unwrap_or(1),
+    }
 }
 
 fn batcher(dir: &Path, seq_len: usize, run: &Run) -> Result<Batcher, Error> {
@@ -332,6 +420,28 @@ impl std::fmt::Display for Error {
             Self::Vocab { config, shards } => {
                 write!(f, "model vocabulary {config} does not match the shards' {shards}")
             }
+            Self::Diverged { step, params } => {
+                writeln!(f, "training diverged at step {step}: the loss is not a number.")?;
+                match params.split_first() {
+                    None => write!(
+                        f,
+                        "every parameter is still finite, so the loss came apart in the forward"
+                    )?,
+                    Some((first, rest)) => {
+                        // Module order, not the order they came apart in: by the
+                        // time a logging step reads the loss the damage has
+                        // spread, and what is worth printing is how far.
+                        write!(f, "{} tensors are not finite, from {first}", params.len())?;
+                        if !rest.is_empty() {
+                            write!(f, " through {}", rest[rest.len() - 1])?;
+                        }
+                    }
+                }
+                write!(
+                    f,
+                    "\nlower --lr, lengthen --warmup, or take the hidden matrices off Muon with --muon false"
+                )
+            }
         }
     }
 }
@@ -412,6 +522,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(checkpoint::latest(out.path()).unwrap(), checkpoint::dir(out.path(), 2));
+    }
+
+    #[test]
+    fn a_run_that_comes_apart_stops_instead_of_finishing_green() {
+        // What a diverged run used to do: 4299 steps of NaN, a checkpoint, a
+        // grade sheet of flat zeroes, and a green CI tick over the top of it.
+        let data = tempfile::tempdir().unwrap();
+        shards(&data.path().join("train"));
+        shards(&data.path().join("valid"));
+        let out = tempfile::tempdir().unwrap();
+        let blown = tiny_run().with_lr(1e30);
+
+        let error = run(&config::Model::toy(), &blown, data.path(), out.path(), &Device::default())
+            .unwrap_err();
+
+        let Error::Diverged { step, params } = error else {
+            panic!("{error}");
+        };
+        assert_eq!(step, 2);
+        // And it says which tensors went, rather than only that something did.
+        assert!(!params.is_empty(), "nothing was reported as non-finite");
     }
 
     #[test]

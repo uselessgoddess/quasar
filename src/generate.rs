@@ -34,6 +34,12 @@ impl Default for Sampler {
 
 /// Continue `prompt`, stopping at `max_tokens` or the end-of-text token.
 ///
+/// Returns prompt and continuation decoded together, not the continuation
+/// alone. Concatenating two separately decoded halves drops whatever the
+/// tokenizer would have joined them with — a word-level vocabulary puts the
+/// spaces back at decode time, so `</spec>` + `t:output` comes out as one word
+/// that parses as neither.
+///
 /// The context is cropped to `seq_len` from the right, so a long generation
 /// slides rather than failing.
 pub fn generate(
@@ -46,7 +52,6 @@ pub fn generate(
 ) -> Result<String, tokenizer::Error> {
     let mut ids = tokenizer.encode_raw(prompt)?;
     let mut rng = ChaCha8Rng::seed_from_u64(sampler.seed);
-    let start = ids.len();
 
     for _ in 0..sampler.max_tokens {
         let context = &ids[ids.len().saturating_sub(seq_len)..];
@@ -56,7 +61,7 @@ pub fn generate(
         }
         ids.push(next);
     }
-    tokenizer.decode(&ids[start..])
+    tokenizer.decode(&ids)
 }
 
 /// One token, sampled from the distribution at the last position.
@@ -126,6 +131,7 @@ mod tests {
         let twice = generate(&model, &tokenizer, "the", cfg.seq_len, &sampler, &device).unwrap();
 
         assert_eq!(once, twice);
+        assert!(once.starts_with("the"), "the prompt comes back with its continuation: {once}");
     }
 
     #[test]

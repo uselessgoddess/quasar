@@ -1,0 +1,40 @@
+[project]
+name = "quasar-factorio"
+version = "0.1.0"
+description = "Dataset, evaluation and rendering harness for training quasar to write Factorio blueprints"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+# There are no runtime dependencies and there is not meant to be one. Corpus
+# construction, tokenisation, validation, the renderer and the metric plots all
+# run out of the standard library — PNG is `zlib` plus `struct` — so CI builds a
+# corpus and draws a training board without a single wheel download.
+dependencies = []
+
+[project.scripts]
+quasar-factorio = "quasar_factorio.cli:main"
+
+# The tools, not the package: `uv run pytest` installs these and nothing else.
+[dependency-groups]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quasar_factorio"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tools", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# A unit test that needs more than five seconds is a test that is doing
+# something other than testing.
+timeout = 60

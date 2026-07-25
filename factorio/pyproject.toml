@@ -5,13 +5,11 @@ description = "Dataset, evaluation and rendering harness for training quasar to 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT OR Apache-2.0" }
+# There are no runtime dependencies and there is not meant to be one. Corpus
+# construction, tokenisation, validation, the renderer and the metric plots all
+# run out of the standard library — PNG is `zlib` plus `struct` — so CI builds a
+# corpus and draws a training board without a single wheel download.
 dependencies = []
-
-[project.optional-dependencies]
-# Only the plotting entry points need these. Dataset construction, tokenisation,
-# validation and the SVG renderer are deliberately dependency-free so that CI can
-# build a corpus without a wheel download.
-plots = ["matplotlib>=3.8"]
 
 [project.scripts]
 quasar-factorio = "quasar_factorio.cli:main"

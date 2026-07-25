@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -33,10 +34,69 @@ jobs:
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 
+  # The dataset, grader, renderer and plots. No GPU and no wheels to download:
+  # the harness declares no runtime dependencies, so this is `uv` fetching a
+  # linter and a test runner and nothing else.
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: factorio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  # The whole blueprint pipeline on the maintainer's card: corpus, training,
+  # generation from every checkpoint, grade and plots. Half an hour is the
+  # budget the run is sized to, and the artifacts are the point of it -- the
+  # metrics board and the contact sheet are what say whether it worked.
+  blueprints:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          rocminfo | grep -m1 -E 'Name:.*gfx'
+          rocm-smi --showproductname --showmeminfo vram
+      # A clear failure on the first step beats a SyntaxError forty minutes of
+      # cached build later.
+      - name: Check the harness interpreter
+        run: python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+      # `nano` at micro_batch 32 uses a fraction of the 135 micro-batches that
+      # fit 16 GiB -- see `budget nano` -- so this cannot run the card out of
+      # memory however long it is left going.
+      - name: Corpus, training, generation and grade
+        run: BACKEND=vulkan examples/factorio.sh runs/nano
+      - name: Preserve the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blueprints
+          path: |
+            runs/nano/*.png
+            runs/nano/*.json
+            runs/nano/*.jsonl
+            runs/nano/*.log
+            runs/nano/best.blueprint
+            runs/nano/frames/*.png
+
   # Synchronized stepwise kernel A/B plus the production optimizer step on the
   # maintainer's GPU. One complete step is discarded for fusion/autotune
   # warm-up; every measured three-step window stays below one minute.
+  #
+  # Off by default: it and `blueprints` share one runner, and the kernel
+  # numbers only move when the kernels do. Run it from the Actions tab.
   gpu-benchmark:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     timeout-minutes: 15
     steps:

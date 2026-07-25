@@ -196,6 +196,16 @@ def serialise(
     return " ".join(tokens)
 
 
+def prompt(spec: Spec) -> str:
+    """The conditioning half of a document: everything up to the first entity.
+
+    Sampling starts here, so it lives next to `serialise` and is built from the
+    same tokens. A prompt assembled by string-slicing a training document would
+    drift the first time the spec grows a field.
+    """
+    return " ".join([BP, *spec.tokens()])
+
+
 _COORD = re.compile(r"^([xy])(\d{2})$")
 
 

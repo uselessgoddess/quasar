@@ -10,6 +10,7 @@ rebuilding the ones before it.
     quasar-factorio preview corpus/preview.png --count 12
     quasar-factorio heatmap corpus/occupancy.png --count 400
     quasar-factorio grade runs/nano/samples.jsonl --sheet runs/nano/sheet.png
+    quasar-factorio plot runs/nano/train.log runs/nano/metrics.png --grade runs/nano/*.jsonl
     quasar-factorio export sample.txt
 
 Printing is brutalist for the same reason the renderer is: fixed-width columns,
@@ -26,7 +27,7 @@ import sys
 from collections.abc import Iterator, Sequence
 
 from . import blueprint as bp
-from . import dataset, grammar, prototypes, render, synth, validate
+from . import dataset, grammar, plots, prototypes, render, synth, validate
 
 # Rule width for the printed tables. 72 so that two of them fit side by side in
 # a 150-column terminal and neither wraps in an 80-column one.
@@ -81,6 +82,20 @@ def _parser() -> argparse.ArgumentParser:
     grade.add_argument("--columns", type=int, default=4)
     grade.add_argument("--worst", action="store_true", help="show the failures, not the best")
     grade.set_defaults(run=_grade)
+
+    plot = sub.add_parser("plot", help="metric panels from a training log")
+    plot.add_argument("log", type=pathlib.Path, help="quasar train stdout, or - for stdin")
+    plot.add_argument("out", type=pathlib.Path)
+    plot.add_argument(
+        "--grade",
+        type=pathlib.Path,
+        nargs="*",
+        default=(),
+        metavar="SAMPLES.JSONL",
+        help="also plot the grader; several files draw the curve over training",
+    )
+    plot.add_argument("--columns", type=int, default=2)
+    plot.set_defaults(run=_plot)
 
     draw = sub.add_parser("render", help="draw one document, by suffix: .png or .svg")
     draw.add_argument("document", type=pathlib.Path, help="a text file, or - for stdin")
@@ -209,6 +224,87 @@ def _grade(args) -> int:
         _sheet(args.sheet, reports, data, columns=args.columns, worst=args.worst)
         print(f"\n{args.sheet}")
     return 0
+
+
+def _plot(args) -> int:
+    """Everything a run produced, on one sheet.
+
+    The grader panels are optional but are the point: a loss curve says the
+    model is fitting the corpus, and only the validity curve says it is
+    learning to build something the game would accept.
+    """
+    run = plots.read_training(_read(args.log))
+    if not (run.loss or run.valid):
+        raise ValueError(f"no training metrics in {args.log}")
+    panels = plots.training_panels(run)
+
+    graded = [(_step_of(path), _summary_of(path)) for path in args.grade]
+    if graded:
+        panels.extend(_grade_panels(sorted(graded)))
+
+    _write(args.out, plots.board(panels, columns=args.columns).png())
+    _rule("PLOT", str(args.out))
+    _rows(
+        [
+            ("plan", run.plan or "?"),
+            ("logged steps", len(run.loss)),
+            ("evaluations", len(run.valid)),
+            ("final valid loss", f"{run.final:.4f}" if run.final is not None else "-"),
+            ("graded checkpoints", len(graded)),
+        ]
+    )
+    return 0
+
+
+def _grade_panels(graded: Sequence[tuple[float, validate.Summary]]) -> list[render.Raster]:
+    """Grader panels: the verdict now, and — with more than one file — over time."""
+    metrics = (
+        ("valid", plots.INKS[3], lambda s: s.valid_rate),
+        ("parses", plots.INKS[0], lambda s: s.parse_rate),
+        ("spec", plots.INKS[2], lambda s: s.spec_rate),
+        ("quality", plots.INKS[1], lambda s: s.mean_quality),
+    )
+    step, last = graded[-1]
+    panels = [
+        plots.bars(
+            [(name, read(last)) for name, _, read in metrics],
+            title=f"GRADE AT STEP {step:.0f} ({last.samples} SAMPLES)",
+            top=1.0,
+        )
+    ]
+    if len(graded) > 1:
+        panels.append(
+            plots.chart(
+                [
+                    plots.Series(name, tuple((at, read(s)) for at, s in graded), color)
+                    for name, color, read in metrics
+                ],
+                title="GRADE OVER TRAINING",
+                floor=0.0,
+            )
+        )
+    if last.errors:
+        worst = sorted(last.errors.items(), key=lambda item: -item[1])[:6]
+        panels.append(plots.bars([(m[:16], n) for m, n in worst], title="WHY IT FAILED"))
+    return panels
+
+
+def _step_of(path: pathlib.Path) -> float:
+    """The step a samples file belongs to, taken from the digits in its name.
+
+    `samples-000400.jsonl` is what the training loop writes per checkpoint, so
+    the step is already in the filename and does not need a sidecar.
+    """
+    digits = "".join(char if char.isdigit() else " " for char in path.stem).split()
+    return float(digits[-1]) if digits else 0.0
+
+
+def _summary_of(path: pathlib.Path) -> validate.Summary:
+    data = prototypes.load()
+    reports = [validate.grade(sample["text"], data) for sample in _samples(path)]
+    if not reports:
+        raise ValueError(f"no samples in {path}")
+    return validate.summarise(reports)
 
 
 def _render(args) -> int:

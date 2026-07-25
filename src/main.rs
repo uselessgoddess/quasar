@@ -4,11 +4,13 @@
 //! `tokenizer` to fit a vocabulary, `prepare` to turn a download into shards,
 //! `train` to run. `eval` and `generate` inspect what came out.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use burn::prelude::*;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use quasar::data::{Batcher, Corpus, Shards, Tokenizer, prepare};
 use quasar::model::Quasar;
@@ -89,6 +91,15 @@ enum Command {
         run: PathBuf,
         #[arg(long, default_value = "\n")]
         prompt: String,
+        /// A file of prompts instead of one: jsonl with a `prompt` field, or
+        /// one prompt per line. Every other field of a jsonl record is passed
+        /// through to the output.
+        #[arg(long, conflicts_with = "prompt")]
+        prompts: Option<PathBuf>,
+        /// Write jsonl here instead of printing. One record per prompt, with
+        /// `text` holding prompt and continuation together.
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long, default_value = "data/tokenizer.json")]
         tokenizer: PathBuf,
         #[arg(long, default_value_t = 128)]
@@ -205,9 +216,23 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Eval { run, data, batches, batch } => evaluate(&run, &data, batches, batch),
-        Command::Generate { run, prompt, tokenizer, tokens, temperature, top_k, seed } => {
+        Command::Generate {
+            run,
+            prompt,
+            prompts,
+            out,
+            tokenizer,
+            tokens,
+            temperature,
+            top_k,
+            seed,
+        } => {
             let sampler = generate::Sampler { temperature, top_k, max_tokens: tokens, seed };
-            sample(&run, &tokenizer, &prompt, &sampler)
+            let asked = match prompts {
+                Some(path) => asks(&path)?,
+                None => vec![Ask { prompt, record: serde_json::Map::new() }],
+            };
+            sample(&run, &tokenizer, &asked, out.as_deref(), &sampler)
         }
     }
 }
@@ -279,16 +304,105 @@ fn evaluate(run: &Path, data: &Path, batches: usize, batch: usize) -> Result<()>
     Ok(())
 }
 
-fn sample(run: &Path, tokenizer: &Path, prompt: &str, sampler: &generate::Sampler) -> Result<()> {
+/// A prompt to continue, and whatever else the file said about it.
+struct Ask {
+    prompt: String,
+    /// The input record, passed through to the output so that whoever wrote the
+    /// prompts gets their own metadata back next to the generation.
+    record: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Continue every prompt in `asked` with the newest checkpoint of `run`.
+///
+/// Loading a checkpoint costs far more than sampling from it, so a sweep of two
+/// hundred prompts belongs in one process rather than two hundred. Each prompt
+/// samples from its own seed: sharing one would draw the same noise every time
+/// and pass it off as a varied sweep.
+fn sample(
+    run: &Path,
+    tokenizer: &Path,
+    asked: &[Ask],
+    out: Option<&Path>,
+    sampler: &generate::Sampler,
+) -> Result<()> {
     let (cfg, dir) = trained(run)?;
     let device = Device::default();
     let mut model = Quasar::new(&cfg, &device);
     checkpoint::weights(&dir, &mut model)?;
     let tokenizer = Tokenizer::load(tokenizer)?;
 
-    let text = generate::generate(&model, &tokenizer, prompt, cfg.seq_len, sampler, &device)?;
-    println!("{prompt}{text}");
+    let bar = ProgressBar::new(asked.len() as u64).with_style(
+        ProgressStyle::with_template("{bar:32} {pos}/{len} sampled in {elapsed}").unwrap(),
+    );
+    if out.is_none() {
+        bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+
+    let mut lines = String::new();
+    for (index, ask) in asked.iter().enumerate() {
+        let seeded =
+            generate::Sampler { seed: sampler.seed.wrapping_add(index as u64), ..*sampler };
+        let text =
+            generate::generate(&model, &tokenizer, &ask.prompt, cfg.seq_len, &seeded, &device)?;
+        match out {
+            // `text` is the whole document rather than the continuation alone:
+            // a grader parses blueprints, and half of one does not parse.
+            Some(_) => {
+                let mut record = ask.record.clone();
+                record.insert("prompt".into(), ask.prompt.clone().into());
+                record.insert("text".into(), format!("{}{text}", ask.prompt).into());
+                lines.push_str(&serde_json::to_string(&record)?);
+                lines.push('\n');
+            }
+            None => println!("{}{text}", ask.prompt),
+        }
+        bar.inc(1);
+    }
+    bar.finish_and_clear();
+
+    if let Some(path) = out {
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, lines).with_context(|| format!("cannot write {}", path.display()))?;
+        println!("{} samples -> {}", asked.len(), path.display());
+    }
     Ok(())
+}
+
+/// Prompts from a jsonl file, or from a plain file of one prompt per line.
+///
+/// Both spellings because both get written: the harness emits jsonl with the
+/// spec it drew the prompt from, and a person testing a checkpoint writes a
+/// text file.
+fn asks(path: &Path) -> Result<Vec<Ask>> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut asked = Vec::new();
+
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        let at = || format!("{}:{}", path.display(), index + 1);
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with('{') {
+            asked.push(Ask { prompt: line.to_owned(), record: serde_json::Map::new() });
+            continue;
+        }
+        let record: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(line).with_context(|| format!("{} is not a json object", at()))?;
+        let prompt = record
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("{} has no `prompt` string", at()))?
+            .to_owned();
+        asked.push(Ask { prompt, record });
+    }
+    if asked.is_empty() {
+        anyhow::bail!("no prompts in {}", path.display());
+    }
+    Ok(asked)
 }
 
 /// The config and newest checkpoint of a run directory.
@@ -422,6 +536,35 @@ mod tests {
             assert_eq!((run.micro_batch, run.accum), (8, 16));
             assert!(run.checkpointing);
         }
+    }
+
+    #[test]
+    fn prompts_are_read_from_jsonl_or_from_plain_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.jsonl");
+        fs::write(
+            &path,
+            "{\"prompt\": \"<bp> <spec>\", \"spec\": {\"kind\": \"belt-lane\"}}\n\n<bp> plain\n",
+        )
+        .unwrap();
+
+        let asked = asks(&path).unwrap();
+
+        assert_eq!(asked.len(), 2, "the blank line is not a prompt");
+        assert_eq!(asked[0].prompt, "<bp> <spec>");
+        // Carried through, so a grader keeps the spec that produced the prompt.
+        assert!(asked[0].record.contains_key("spec"));
+        assert_eq!(asked[1].prompt, "<bp> plain");
+        assert!(asked[1].record.is_empty());
+    }
+
+    #[test]
+    fn a_prompt_file_that_says_nothing_is_an_error_not_an_empty_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompts.jsonl");
+        fs::write(&path, "\n \n").unwrap();
+
+        assert!(asks(&path).is_err());
     }
 
     /// The corpus is built against this shape: 495 tokens of vocabulary and

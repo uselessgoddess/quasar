@@ -149,6 +149,14 @@ collides, and the manifest says by how much. The 6,000 draws
 `examples/factorio.sh` defaults to give 2,439 layouts and 3.17M tokens, already
 more than a 3.5M-parameter model gets through in half an hour.
 
+The corpus is entirely synthetic, and nothing here fetches from the network:
+what a run trains on has to be reproducible from a seed and a pinned
+`prototypes.json`. Human blueprints — factorioprints.com and the like — are
+still the obvious source of the variety a generator does not invent, so
+`dataset.build` takes an `extra` iterator of `Design`s that is deduplicated,
+graded and split by exactly the rules the drawn ones are. Scraping into it is a
+script that does not exist yet, not a change to the pipeline.
+
 ## How output is judged
 
 Loss says the model is fitting the corpus. Only the grader says it is learning

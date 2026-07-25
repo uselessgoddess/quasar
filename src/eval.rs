@@ -28,9 +28,12 @@ pub struct Report {
 /// builds no graph, and on a 16 GB card the activation memory of one is the
 /// difference between an eval that fits and one that does not.
 pub fn evaluate(model: &Quasar, data: &Batcher, batches: usize, device: &Device) -> Report {
-    // `evals` is never zero, so there is nothing to floor this at: a corpus too
-    // small for a full batch is evaluated on the short one it can fill.
-    let batches = batches.min(data.evals());
+    // Clamped, not floored at one after the fact: `evals` is never zero, so a
+    // corpus too small for a full batch is evaluated on the short one it can
+    // fill rather than on a window past its end. The lower bound is only there
+    // so that asking for no batches reports one rather than dividing by no
+    // tokens at all.
+    let batches = batches.clamp(1, data.evals());
     let mut total = 0.0;
     let mut tokens = 0u64;
     for index in 0..batches {

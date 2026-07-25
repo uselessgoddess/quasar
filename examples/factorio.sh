@@ -21,7 +21,8 @@ corpus=${CORPUS:-$out/corpus}
 # 6,000 designs is roughly where the generators start repeating themselves at
 # four variants each; see factorio/experiments/saturation.py.
 designs=${DESIGNS:-6000}
-steps=${STEPS:-600}
+# Empty means the preset's own length; see the train stage.
+steps=${STEPS:-}
 # `nano` samples one token per forward pass with no cache, so this is the knob
 # that decides whether the run fits its budget, not the training length.
 prompts=${PROMPTS:-24}
@@ -57,23 +58,33 @@ stage corpus
 head -n "$prompts" "$corpus/prompts.jsonl" >"$out/prompts.jsonl"
 
 stage train
-# The schedule is derived from `steps` rather than left at the preset defaults,
-# which are sized for a 2,000-step run and overlap in a shorter one. The
-# proportions are the preset's: 5% warmup, 20% decay.
-warmup=$((steps / 20 > 0 ? steps / 20 : 1))
-decay=$((steps / 5 > 0 ? steps / 5 : 1))
-# A one- or two-step run — someone smoke-testing the script — asks for more
-# warmup and decay than it has steps. The stable phase is what gives way; the
-# schedule refuses the overlap rather than reinterpreting it.
-[ $((warmup + decay)) -le "$steps" ] || decay=$((steps - warmup))
+# Unset `STEPS` means the preset decides, and what it decides is the Chinchilla
+# budget: 20 tokens per parameter, about 4,300 steps of 16k tokens — see
+# `cargo run -- budget factorio-nano --micro-batch 32`. A run shorter than that
+# is not a smaller experiment, it is one whose curves have not separated the
+# model from its initialisation, which is the whole reason this is the default.
+#
+# Setting STEPS derives the same proportions — 5% warmup, 20% decay — for the
+# shorter run, which is what a smoke test wants.
+schedule=()
+if [ -n "$steps" ]; then
+    warmup=$((steps / 20 > 0 ? steps / 20 : 1))
+    decay=$((steps / 5 > 0 ? steps / 5 : 1))
+    # A one- or two-step run — someone smoke-testing the script — asks for more
+    # warmup and decay than it has steps. The stable phase is what gives way;
+    # the schedule refuses the overlap rather than reinterpreting it.
+    [ $((warmup + decay)) -le "$steps" ] || decay=$((steps - warmup))
+    schedule=(
+        --steps "$steps" --warmup "$warmup" --decay "$decay"
+        --save-every "$((steps / 4 > 0 ? steps / 4 : 1))"
+        --eval-every "$((steps / 20 > 0 ? steps / 20 : 1))"
+        --log-every "$((steps / 60 > 0 ? steps / 60 : 1))"
+    )
+fi
 # `tee` rather than `>`: the log is the input to the plots, and a run whose
 # output cannot be watched is a run nobody will wait for.
-"${quasar[@]}" train nano \
-    --data "$corpus" --out "$out" \
-    --steps "$steps" --warmup "$warmup" --decay "$decay" \
-    --save-every "$((steps / 3 > 0 ? steps / 3 : 1))" \
-    --eval-every "$((steps / 12 > 0 ? steps / 12 : 1))" \
-    --log-every "$((steps / 60 > 0 ? steps / 60 : 1))" \
+"${quasar[@]}" train factorio-nano \
+    --data "$corpus" --out "$out" "${schedule[@]}" \
     2>&1 | tee "$out/train.log"
 
 stage generate

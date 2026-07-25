@@ -188,8 +188,8 @@ enum Preset {
     /// `tiny`, cut down to what trains fastest inside 16 GB.
     TinyTurbo,
     Base,
-    /// ~3M, 495-token vocabulary — the Factorio blueprint model.
-    Nano,
+    /// 3.5M, 495-token vocabulary — the Factorio blueprint family.
+    FactorioNano,
     Toy,
 }
 
@@ -255,6 +255,12 @@ fn budget(cfg: config::Model, micro_batch: usize) -> Result<()> {
     println!("attn keys/query  {}", cfg.attn_pairs() / cfg.seq_len);
     println!("fwd FLOPs/token  {:.1}M", flops / 1e6);
     println!("step FLOPs/token {:.1}M", 3.0 * flops / 1e6);
+    // What a finished run of this model costs, before any wall clock is
+    // involved: 20 tokens per parameter, and the steps that buys at the batch
+    // being asked about.
+    let batch = micro_batch * cfg.seq_len;
+    println!("chinchilla       {:.1}M tokens", cfg.chinchilla_tokens() as f64 / 1e6);
+    println!("  at batch {batch:<6} {} steps", cfg.chinchilla_tokens().div_ceil(batch));
     // Weights, gradients and two Adam moments. Pure bf16 is 8 B/param; keeping
     // fp32 master weights and moments doubles it, which is what decides whether
     // a preset fits 16 GB before a single activation is allocated.
@@ -437,7 +443,7 @@ impl Preset {
             Self::Tiny => config::Model::tiny(),
             Self::TinyTurbo => config::Model::tiny_turbo(),
             Self::Base => config::Model::base(),
-            Self::Nano => config::Model::nano(),
+            Self::FactorioNano => config::factorio::nano(),
             Self::Toy => config::Model::toy(),
         }
     }
@@ -449,11 +455,15 @@ impl Preset {
     /// the default token budget is unchanged. Larger presets keep the
     /// memory-saving defaults; callers can still override every path.
     ///
-    /// `nano` is the other end: at 3M parameters the memory-saving defaults buy
-    /// nothing and cost a third of the throughput, so both come off and the
-    /// batch goes into micro-batch where it runs as one pass. 2,000 steps of
-    /// 16k tokens is about fourteen epochs of the blueprint corpus, which is
-    /// what a run capped at half an hour has room for.
+    /// `factorio-nano` is the other end: at 3.5M parameters the memory-saving
+    /// defaults buy nothing and cost a third of the throughput, so both come
+    /// off and the batch goes into micro-batch where it runs as one pass.
+    ///
+    /// Its length is not a wall-clock choice. The Chinchilla ratio asks for 20
+    /// tokens per parameter, which at a 16k-token batch is about 4,300 steps —
+    /// a quarter of an hour at the throughput this preset measured. A shorter
+    /// run is not a smaller experiment, it is one whose curves have not
+    /// separated the model from its initialisation yet.
     fn run_defaults(self) -> train::Run {
         match self {
             Self::TinyTurbo => train::Run::new()
@@ -461,16 +471,23 @@ impl Preset {
                 .with_accum(32)
                 .with_checkpointing(false)
                 .with_ssd_mode(Some(config::SsdMode::Serial)),
-            Self::Nano => train::Run::new()
-                .with_steps(2_000)
-                .with_micro_batch(32)
-                .with_accum(1)
-                .with_warmup(100)
-                .with_decay(400)
-                .with_eval_every(100)
-                .with_save_every(500)
-                .with_checkpointing(false)
-                .with_ssd_mode(Some(config::SsdMode::Serial)),
+            Self::FactorioNano => {
+                let cfg = config::factorio::nano();
+                let (micro, accum) = (32, 1);
+                let steps = config::factorio::chinchilla_steps(&cfg, micro * accum * cfg.seq_len);
+                train::Run::new()
+                    .with_steps(steps)
+                    .with_micro_batch(micro)
+                    .with_accum(accum)
+                    // The preset's own proportions: 5% warmup, 20% decay.
+                    .with_warmup(steps / 20)
+                    .with_decay(steps / 5)
+                    .with_eval_every(steps / 20)
+                    .with_save_every(steps / 4)
+                    .with_log_every(steps / 60)
+                    .with_checkpointing(false)
+                    .with_ssd_mode(Some(config::SsdMode::Serial))
+            }
             Self::Tiny | Self::Base | Self::Toy => train::Run::new(),
         }
     }
@@ -539,13 +556,18 @@ mod tests {
         assert_eq!((turbo.micro_batch, turbo.accum), (4, 32));
         assert!(!turbo.checkpointing);
 
-        let nano = Preset::Nano.run_defaults();
+        let nano = Preset::FactorioNano.run_defaults();
 
         assert_eq!(nano.ssd_mode, Some(config::SsdMode::Serial));
         assert_eq!((nano.micro_batch, nano.accum), (32, 1));
         assert!(!nano.checkpointing);
         // The schedule has to fit inside the run it is scheduling.
         assert!(nano.warmup + nano.decay < nano.steps);
+        // And the run has to be long enough to be worth reading: 20 tokens per
+        // parameter, the floor `config::factorio` derives everything from.
+        let cfg = Preset::FactorioNano.config();
+        let seen = nano.steps * nano.micro_batch * nano.accum * cfg.seq_len;
+        assert!(seen >= cfg.chinchilla_tokens(), "{seen} tokens is short");
 
         for preset in [Preset::Tiny, Preset::Base, Preset::Toy] {
             let run = preset.run_defaults();
@@ -604,17 +626,21 @@ mod tests {
         assert_eq!(asked, checkpoint::dir(run, 10));
     }
 
-    /// The corpus is built against this shape: 495 tokens of vocabulary and
-    /// documents up to 460 long. A mismatch here is caught by `train` as a
-    /// vocab error, but only after the shards have been written.
+    /// Every member of the Factorio family is reachable from the CLI. The
+    /// family is where the shapes are checked against the corpus; this only
+    /// pins that adding one and forgetting the `--preset` name is a test
+    /// failure rather than a model nobody can train.
     #[test]
-    fn nano_matches_the_blueprint_corpus() {
-        let cfg = Preset::Nano.config();
+    fn the_factorio_family_is_spelled_out_in_the_preset_list() {
+        let names: Vec<_> = Preset::value_variants()
+            .iter()
+            .filter_map(|preset| preset.to_possible_value())
+            .map(|value| value.get_name().to_string())
+            .collect();
 
-        assert_eq!(cfg.vocab_size, 495);
-        assert!(cfg.seq_len >= 512);
-        // Every entity already placed constrains the next one, so the window
-        // has to reach back over a whole blueprint rather than a slice of one.
-        assert_eq!(cfg.attn_window, None);
+        for size in config::factorio::Size::ALL {
+            assert!(names.contains(&size.name().to_string()), "{} is not a preset", size.name());
+        }
+        assert_eq!(Preset::FactorioNano.config(), config::factorio::Size::Nano.model());
     }
 }

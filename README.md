@@ -3,13 +3,14 @@
 A Mamba-3 language model family trained end to end on one consumer GPU, in Rust
 on [burn](https://github.com/tracel-ai/burn) + wgpu.
 
-Four presets, all hybrid stacks of Mamba-3 blocks with a GQA layer every fourth
-to seventh position — sliding-window everywhere except `nano`, whose context is
-one whole blueprint and has nothing to slide over:
+Three language presets plus a Factorio family, all hybrid stacks of Mamba-3
+blocks with a GQA layer every fourth to seventh position — sliding-window
+everywhere except `factorio-nano`, whose context is one whole blueprint and has
+nothing to slide over:
 
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
-| `nano` | 3.5M | 8.1M | 0.05 GiB | 0.12 GiB | 135 |
+| `factorio-nano` | 3.5M | 8.1M | 0.05 GiB | 0.12 GiB | 135 |
 | `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
 | `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
@@ -136,7 +137,7 @@ samples — the whole pipeline in under a minute on a CPU.
 
 ## Factorio blueprints
 
-[`factorio/`](factorio/README.md) is a harness that trains `nano` to build
+[`factorio/`](factorio/README.md) is a harness that trains `factorio-nano` to build
 Factorio blueprints instead of text: a synthetic corpus with the game's real
 sizes and recipes, a grammar a blueprint round-trips through, a grader that says
 whether a generated design would power up, and a metrics board. The whole run —

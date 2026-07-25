@@ -71,9 +71,9 @@ jobs:
       # cached build later.
       - name: Check the harness interpreter
         run: python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
-      # `nano` at micro_batch 32 uses a fraction of the 135 micro-batches that
-      # fit 16 GiB -- see `budget nano` -- so this cannot run the card out of
-      # memory however long it is left going.
+      # `factorio-nano` at micro_batch 32 uses a fraction of the 135
+      # micro-batches that fit 16 GiB -- see `budget factorio-nano` -- so this
+      # cannot run the card out of memory however long it is left going.
       - name: Corpus, training, generation and grade
         run: BACKEND=vulkan examples/factorio.sh runs/nano
       - name: Preserve the run

@@ -5,7 +5,10 @@ corpus, the grammar quasar reads it in, a grader that scores generations the way
 the game would, and a renderer so the output can be looked at rather than
 squinted at.
 
-The model itself is the `nano` preset in the Rust crate one directory up. This
+The model itself is the `factorio-nano` preset in the Rust crate one directory
+up — its own model family in `src/config/factorio.rs`, sized by this corpus
+rather than by a parameter class, with room for a larger member once the grid
+grows. This
 package is the harness around it, and it is deliberately dependency-free —
 `pyproject.toml` declares no runtime dependencies at all. PNG comes out of
 `zlib` and `struct`, the plots are drawn into the same framebuffer as the
@@ -13,11 +16,11 @@ blueprints, and CI builds a corpus without downloading a wheel.
 
 ## The model
 
-`quasar-nano` is 3.5M parameters, sized for this corpus rather than scaled down
+`quasar-factorio-nano` is 3.5M parameters, sized for this corpus rather than scaled down
 from `tiny`:
 
 ```
-$ cargo run --release -- budget nano
+$ cargo run --release -- budget factorio-nano
 embedding       0.1M      seq_len          512
 lm_head         0.0M      ssd chunk         32
 ssm             1.5M      fwd FLOPs/token  8.1M
@@ -30,7 +33,7 @@ Three numbers decide the shape. The vocabulary is **495 tokens** instead of
 32,768, so the embedding costs almost nothing and the whole budget goes into the
 stack. The longest document in the corpus is **460 tokens**, so `seq_len 512`
 holds a whole blueprint and there is nothing past it worth attending to. And
-attention is **unwindowed**, which is the one place `nano` disagrees with every
+attention is **unwindowed**, which is the one place this family disagrees with every
 larger preset: the task is placing entities that must not overlap ones already
 placed, a 64-entity blueprint is 400 tokens of history that all of it depends
 on, and a 128-token window would hide two thirds of the design being built.
@@ -92,7 +95,7 @@ python -m quasar_factorio.cli heatmap corpus/occupancy.png --count 400
 
 # train, from the repository root
 cargo run --release --no-default-features --features vulkan -- \
-    train nano --data corpus --out runs/nano 2>&1 | tee runs/nano/train.log
+    train factorio-nano --data corpus --out runs/nano 2>&1 | tee runs/nano/train.log
 
 # generate against the specs it was never trained on. Naming a checkpoint
 # rather than the run samples the model as it was at that step, which is what

@@ -690,14 +690,13 @@ MODULE_POLE = "medium-electric-pole"
 
 @functools.cache
 def _module_targets(data: Data) -> tuple[planner.Module, ...]:
-    """Every product a stacked-band module can make, with what it is handed.
+    """Every product a module can make, with what it is handed.
 
-    Filtered by shape rather than taking the catalogue whole: `plan.modules` also
-    offers forks, and this builder stacks. Drawing one here would emit a layout
-    where the last machine is fed by the row above and starves for the branch
-    that is not there.
+    The catalogue whole, both shapes: `module` reads `Module.shape` and picks the
+    builder that can express the plan, so a fork is a target here exactly as a
+    stack is.
     """
-    return tuple(module for module in planner.modules(data) if module.shape == "stack")
+    return planner.modules(data)
 
 
 @dataclass(frozen=True)
@@ -746,20 +745,41 @@ class Layout:
 def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     """A closed module: inputs on the edge, a recipe chain inside, one output.
 
-    This is the layout the whole planner exists for, and it is one idea repeated
-    once per stage of the chain. A stage is a belt, a row of inserters facing
-    down into a row of machines, and a row of inserters facing down out of them —
-    so the belt *below* one stage is the belt *above* the next, and the product
-    of the machines above lands on exactly the belt the machines below draw from.
-    A two-stage chain stacks two of those and the intermediate never touches the
-    module boundary at all.
+    This is the layout the whole planner exists for, and it comes in the two
+    shapes `plan.modules` catalogues. Both are built out of the same band — a
+    belt, a row of inserters facing down into a row of machines, and a row of
+    inserters facing down out of them — and differ only in how the bands are
+    arranged: `_stacked` runs them down one column, `_forked` runs two columns
+    side by side into a machine that consumes both.
 
-    Raw ingredients enter at the upstream end of whichever stage needs them,
-    which is why `plan.modules` rejects a chain whose stage wants more raws than
-    a belt has lanes. The finished product leaves at the far end of the bottom
-    belt, and that tile is the only place anything crosses the edge: every other
-    belt row stops one column short and ends against a pole, so nothing spills
-    into whatever the player puts next to this.
+    Raw ingredients enter at the upstream end of whichever band needs them, which
+    is why `plan.modules` rejects a chain whose stage wants more raws than a belt
+    has lanes. The finished product leaves at the far end of the bottom belt, and
+    that tile is the only place anything crosses the edge: every other belt row
+    stops short and ends against a pole, so nothing spills into whatever the
+    player puts next to this.
+
+    A zone the player marked out is not always the zone a design fills, so some
+    of the corpus is drawn a little smaller than it was asked for. The spec then
+    states the request and the grader checks the design fits inside it, which is
+    the relation that holds at inference time.
+    """
+    target = rng.choice(_module_targets(data))
+    layout = Layout.draw(rng)
+    build = _forked if target.shape == "fork" else _stacked
+    blueprint, ports, steps = build(rng, data, target, layout)
+    slack = rng.choices((0, 1, 2), weights=(6, 2, 1))[0]
+    return _module_spec(blueprint, ports, steps, target.product, slack, rng, data)
+
+
+def _stacked(
+    rng: random.Random, data: Data, target: planner.Module, layout: Layout
+) -> tuple[Blueprint, list[Port], tuple]:
+    """One column of bands, each handing its product to the row below.
+
+    The belt *below* one stage is the belt *above* the next, so the product of
+    the machines above lands on exactly the belt the machines below draw from,
+    and a two-stage chain's intermediate never touches the module boundary.
 
     Everything the layout is free to choose lives in :class:`Layout`, plus the
     direction each belt row runs, which is drawn per row rather than per design:
@@ -767,10 +787,8 @@ def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     produces those, while flipping one row is a design the corpus has not seen.
     Which flips are available is geometry and not taste — see `_runs`.
     """
-    target = rng.choice(_module_targets(data))
     product, supply = target.product, target.supply
     unit = planner.solve(data, product, supply, rate=1e-9, depth=target.depth)
-    layout = Layout.draw(rng)
     stages = _budgeted(data, target, unit, rng, layout)
 
     tier = _tier(rng)
@@ -800,15 +818,160 @@ def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
 
     _, tail, side = _belt_row(canvas, belt, row, width, runs[-1], full=True)
     ports.append(Port("out", product, tail, row, "e" if side == "w" else "w"))
+    return canvas.build(f"{product} module"), ports, tuple(stage.step() for stage in stages)
 
-    blueprint = canvas.build(f"{product} module")
-    steps = tuple(stage.step() for stage in stages)
-    # A zone the player marked out is not always the zone a design fills, so
-    # some of the corpus is drawn a little smaller than it was asked for. The
-    # spec then states the request and the grader checks the design fits inside
-    # it, which is the relation that holds at inference time.
-    slack = rng.choices((0, 1, 2), weights=(6, 2, 1))[0]
-    return _module_spec(blueprint, ports, steps, product, slack, rng, data)
+
+def _forked(
+    rng: random.Random, data: Data, target: planner.Module, layout: Layout
+) -> tuple[Blueprint, list[Port], tuple]:
+    """Two columns of bands converging on a machine that consumes both.
+
+    The shape a run of bands cannot express: the last machine wants two items
+    that both have to be made, and a belt hands items downstream and nowhere
+    else, so the first of the two would sail past the row that wants it. Here
+    each branch is its own column with its own belts, and the two columns are
+    bottom-aligned so that they hand their products to the same belt at the same
+    row.
+
+    Two columns and not one wide one is also what keeps the lanes honest. The
+    near branch may want copper plate and the far one iron, and a single belt
+    across both would then carry the union — which is the count `plan.modules`
+    caps at two per belt. Split down the middle, each belt carries only what its
+    own branch asked for.
+
+    Everything else follows from which way the belts run. The near branch takes
+    its raws eastward from the left edge and the far branch westward from the
+    right, so both heads are on a boundary and can be declared as ports, and the
+    two runs end nose to nose against one shared pole in the middle rather than
+    feeding each other. The last stage then sits below the convergence belt and
+    no further left than the far branch drops onto it, because a machine picking
+    up upstream of that would wait forever for something that went the other way.
+    """
+    unit = planner.solve(data, target.product, target.supply, rate=1e-9, depth=target.depth)
+    # Which branch stands on the left. Not a mirror image — mirroring this design
+    # also moves the last stage to the other end — so the augmenter does not
+    # already produce it and `augment.canonical` does not see through it.
+    swapped = rng.choice((False, True))
+    unit = _fork_budgeted(data, target, unit, rng, layout, swapped)
+    fork = _fork_plan(data, unit, layout, swapped)
+
+    tier = _tier(rng)
+    belt = BELTS[tier]
+    inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
+    canvas = Canvas.new(data)
+    ports: list[Port] = []
+    powered = {fork.join + 1}
+
+    for stages, columns, rows, direction in (
+        (fork.near, fork.near_columns, fork.near_rows, EAST),
+        (fork.far, fork.far_columns, fork.far_rows, WEST),
+    ):
+        east = direction == EAST
+        # Both runs stop against the same pole at `divide - 1`, from either side.
+        lo, hi = (0, fork.divide - 2) if east else (fork.divide, fork.width - 1)
+        for stage, band, row in zip(stages, columns, rows, strict=True):
+            proto = data.entities[stage.machine]
+            head = _segment(canvas, belt, row, lo, hi, direction)
+            for x in band:
+                canvas.place(inserter, x, row + 1, SOUTH)
+                canvas.place(stage.machine, x, row + 2, recipe=stage.recipe)
+                canvas.place(inserter, x, row + 2 + proto.height, SOUTH)
+            powered.add(row + 1)
+            for item in dict.fromkeys(stage.ingredients):
+                if item in unit.supply:
+                    ports.append(Port("in", item, head, row, "w" if east else "e"))
+
+    _segment(canvas, belt, fork.join, 0, fork.width - 2, EAST)
+    last = fork.last
+    proto = data.entities[last.machine]
+    for x in fork.last_columns:
+        canvas.place(inserter, x, fork.join + 1, SOUTH)
+        canvas.place(last.machine, x, fork.join + 2, recipe=last.recipe)
+        canvas.place(inserter, x, fork.join + 2 + proto.height, SOUTH)
+
+    # Poles once per row of inserters rather than once per band: the two branches
+    # share their rows, and a second pass over a row it has already covered would
+    # only wedge poles into the gaps the first pass deliberately left.
+    for row in sorted(powered):
+        _power_row(canvas, row, fork.width, layout.cadence)
+
+    out = fork.join + 3 + proto.height
+    run = rng.choice(_directions([fork.last_columns], 1, fork.width))
+    _, tail, side = _belt_row(canvas, belt, out, fork.width, run, full=True)
+    ports.append(Port("out", target.product, tail, out, "e" if side == "w" else "w"))
+    return canvas.build(f"{target.product} module"), ports, unit.steps()
+
+
+@dataclass(frozen=True)
+class Fork:
+    """Where every part of a branching module goes, before anything is placed.
+
+    Worked out up front because the machine budget is decided by measuring: the
+    entity count is a step function of the plan, and the only way to know what a
+    plan costs is to lay it out. `_fork_budgeted` builds one of these per
+    candidate plan and keeps the largest that fits.
+    """
+
+    #: Stages of the branch against the left edge, and of the one against the right.
+    near: tuple
+    far: tuple
+    #: The stage both branches feed.
+    last: planner.Stage
+    near_columns: list[list[int]]
+    far_columns: list[list[int]]
+    last_columns: list[int]
+    #: Belt row of each band, top to bottom, per branch.
+    near_rows: list[int]
+    far_rows: list[int]
+    #: First column of the far branch; the shared end pole sits one to its left.
+    divide: int
+    #: Row of the belt the two branches converge on.
+    join: int
+    width: int
+
+
+def _fork_plan(data: Data, unit, layout: Layout, swapped: bool) -> Fork | None:
+    """Lay out `unit` as two branches and a last stage, or `None` if it is not one."""
+    split = planner.fork(unit)
+    if split is None:
+        return None
+    near, far = split[::-1] if swapped else split
+    last = unit.stages[-1]
+
+    # One spare column between the two windows for the pole both runs end
+    # against, plus the gap, so a wider spacing does not glue the branches
+    # together at the seam.
+    divide = _widest(data, near, layout) + 1 + layout.gap
+    near_columns = _branch(data, near, layout, divide - 1 - layout.gap, "left")
+    window = _widest(data, far, layout)
+    far_columns = [
+        [divide + column for column in band] for band in _branch(data, far, layout, window, "right")
+    ]
+
+    proto = data.entities[last.machine]
+    stride = proto.width + layout.gap
+    # No further left than the far branch's leftmost drop: everything the near
+    # branch drops is upstream of that already.
+    start = min(far_columns[-1]) + layout.gap
+    last_columns = [start + index * stride for index in range(last.count)]
+    width = max(divide + window, last_columns[-1] + proto.width) + 1 + layout.margin
+
+    # Bottom-aligned: the shallower branch starts further down, so both hand
+    # their product to the belt at `join` and neither has a dangling last row.
+    join = max(_depth(data, near), _depth(data, far))
+    return Fork(
+        near=near,
+        far=far,
+        last=last,
+        near_columns=near_columns,
+        far_columns=far_columns,
+        last_columns=last_columns,
+        near_rows=_rows(data, near, join),
+        far_rows=_rows(data, far, join),
+        divide=divide,
+        join=join,
+        width=width,
+    )
 
 
 def _belt_row(
@@ -832,6 +995,20 @@ def _belt_row(
     if not full:
         canvas.maybe(MODULE_POLE, head + step * length, row)
     return head, head + step * (length - 1), "w" if direction == EAST else "e"
+
+
+def _segment(canvas: Canvas, belt: str, row: int, lo: int, hi: int, direction: int) -> int:
+    """Part of a belt row, from `lo` to `hi` inclusive, and its upstream end.
+
+    Unlike `_belt_row` this does not span the module: a fork puts two runs in one
+    row, one per branch, so that neither belt carries the other branch's items.
+    Both end against a pole one tile past their downstream end, which is what
+    keeps two runs pointed at each other from feeding one another.
+    """
+    head = lo if direction == EAST else hi
+    canvas.line(belt, head, row, hi - lo + 1, direction)
+    canvas.maybe(MODULE_POLE, hi + 1 if direction == EAST else lo - 1, row)
+    return head
 
 
 def _power_row(canvas: Canvas, row: int, width: int, cadence: int) -> None:
@@ -863,6 +1040,38 @@ def _columns(data: Data, stages, layout: Layout, width: int) -> list[list[int]]:
     if all(_directions(columns, row, width) for row in range(len(columns) + 1)):
         return columns
     return _placed(data, stages, replace(layout, align="left"), width)
+
+
+def _branch(data: Data, stages, layout: Layout, width: int, anchor: str) -> list[list[int]]:
+    """Which columns each stage of one branch of a fork stands in.
+
+    A branch's belts all run the same way — it is fed from the edge its head is
+    on — so the reach condition `_directions` checks per row applies to the
+    column as a whole, and the fallback is the same idea as `_columns`': squared
+    up against the edge the items come in from, every band's drops are upstream
+    of the pickups below.
+    """
+    columns = _placed(data, stages, layout, width)
+    pairs = list(zip(columns, columns[1:], strict=False))
+    if anchor == "left":
+        reaches = all(min(above) <= min(below) for above, below in pairs)
+    else:
+        reaches = all(max(above) >= max(below) for above, below in pairs)
+    return columns if reaches else _placed(data, stages, replace(layout, align=anchor), width)
+
+
+def _rows(data: Data, stages, bottom: int) -> list[int]:
+    """The belt row of each band, stacked upwards from the row they end on."""
+    row, rows = bottom - _depth(data, stages), []
+    for stage in stages:
+        rows.append(row)
+        row += 3 + data.entities[stage.machine].height
+    return rows
+
+
+def _depth(data: Data, stages) -> int:
+    """How many rows a column of bands occupies: belt, inserters, machine, inserters."""
+    return sum(3 + data.entities[stage.machine].height for stage in stages)
 
 
 def _placed(data: Data, stages, layout: Layout, width: int) -> list[list[int]]:
@@ -922,7 +1131,12 @@ def _runs(rng: random.Random, columns: list[list[int]], width: int) -> list[int]
 
 def _module_width(data: Data, stages, layout: Layout) -> int:
     """Wide enough for the widest stage, plus whatever margin was asked for."""
-    return layout.margin + max(
+    return layout.margin + _widest(data, stages, layout)
+
+
+def _widest(data: Data, stages, layout: Layout) -> int:
+    """Columns the widest of `stages` needs, machines and the gaps between them."""
+    return max(
         stage.count * data.entities[stage.machine].width + (stage.count - 1) * layout.gap
         for stage in stages
     )
@@ -961,6 +1175,47 @@ def _entities(data: Data, stages, layout: Layout) -> int:
     for stage in stages:
         # belt, end pole, three entities a machine, and the poles over them
         total += (width - 1) + 1 + 3 * stage.count + poles
+    return total
+
+
+def _fork_budgeted(
+    data: Data, target: planner.Module, unit, rng: random.Random, layout: Layout, swapped: bool
+):
+    """The largest branching plan whose layout still fits `MODULE_ENTITIES`.
+
+    Searched the same way as `_budgeted`, and laid out rather than estimated from
+    the stage list: a fork's width depends on where the far branch drops, which is
+    not a function of the machine count alone.
+    """
+    for machines in range(rng.randint(unit.machines, unit.machines * 3), unit.machines - 1, -1):
+        try:
+            candidate = planner.fit(
+                data, target.product, target.supply, machines=machines, depth=target.depth
+            )
+        except planner.PlanError:
+            continue
+        fork = _fork_plan(data, candidate, layout, swapped)
+        if fork is not None and _fork_entities(fork, layout) <= MODULE_ENTITIES:
+            return candidate
+    return unit
+
+
+def _fork_entities(fork: Fork, layout: Layout) -> int:
+    """What `_forked` will place, without placing it. An upper bound, as `_entities`.
+
+    Generous on purpose where the two branches share a row: their end poles are
+    the same tile and their poles the same run, but counting each band on its own
+    is simpler than tracking which rows overlap, and over-estimating costs a
+    machine off the plan while under-estimating costs a truncated document.
+    """
+    poles = -(-fork.width // layout.cadence)
+    machines = sum(stage.count for stage in (*fork.near, *fork.far, fork.last))
+    total = fork.width  # the output belt, which runs the full width
+    total += fork.width  # the convergence belt, one column short, and its pole
+    total += (len(fork.near_rows) + len(fork.far_rows) + 1) * poles
+    total += 3 * machines
+    total += len(fork.near_rows) * fork.divide  # a near run reaches `divide - 2`
+    total += len(fork.far_rows) * (fork.width - fork.divide + 1)
     return total
 
 

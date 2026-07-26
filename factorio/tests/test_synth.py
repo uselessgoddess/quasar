@@ -101,6 +101,9 @@ def test_recipes_are_only_ever_paired_with_machines_that_can_run_them():
         assert validate.illegal_recipes(blueprint, DATA) == 0
 
 
+FORKS = tuple(module for module in plan.modules(DATA) if module.shape == "fork")
+
+
 def test_every_module_draw_makes_the_item_it_advertises():
     """The contract the other generators cannot be held to.
 
@@ -108,13 +111,49 @@ def test_every_module_draw_makes_the_item_it_advertises():
     *work*, and that is checkable because the spec says what goes in and what
     should come out. Anything less than 1.0 here means the corpus is teaching a
     layout that starves, which is precisely the failure the local metrics missed.
+
+    Both shapes go through this loop, and the products are collected so that the
+    branching ones are covered on purpose rather than by luck: a fork is the
+    layout most likely to starve, because its last machine is fed by two columns
+    and being wrong about either one of them is enough.
     """
-    for blueprint, spec in draw(synth.module, 120):
+    products = set()
+    for blueprint, spec in draw(synth.module, 200):
         report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
         assert report.ported, spec.product
         assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0), spec.product
         assert (report.mixed, report.leaks) == (0, 0), spec.product
         assert report.within_zone, spec.product
+        products.add(spec.product)
+    assert {module.product for module in FORKS} <= products
+    assert products - {module.product for module in FORKS}  # and stacks too
+
+
+def test_a_branching_module_is_two_columns_and_not_a_deeper_stack():
+    """The geometry the flow report cannot tell apart from a lucky stack.
+
+    A fork exists because its last machine wants two made items, and a single
+    column of bands can deliver only one of them — but it also exists to keep the
+    lanes honest, and that part is geometry: two branches with two sets of raws
+    need two belts per row, not one wide one carrying the union. So every band
+    row of a fork holds a pair of runs pointed at each other, one fed from each
+    edge, ending nose to nose against the pole between them.
+
+    Read off the builder's own output rather than a draw from `module`, which
+    rotates what it is given and would turn the rows into columns.
+    """
+    for index, target in enumerate(FORKS):
+        for seed in range(6):
+            rng = random.Random(seed * 31 + index)
+            blueprint, ports, _ = synth._forked(rng, DATA, target, synth.Layout.draw(rng))
+            rows = {}
+            for placement in blueprint.entities:
+                if DATA.entity(placement.name).category in flow.BELTS:
+                    rows.setdefault(placement.y, set()).add(placement.direction)
+            assert any(len(runs) > 1 for runs in rows.values()), (target, seed)
+            # One way in per branch per band, and exactly one way out.
+            assert [port.role for port in ports].count("out") == 1, target
+            assert {port.side for port in ports if port.role == "in"} == {"w", "e"}, target
 
 
 def test_a_module_declares_a_port_for_everything_it_is_handed_and_makes():

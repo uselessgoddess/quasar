@@ -108,10 +108,24 @@ class Report:
     delivers: float = 0.0
     fed: float = 0.0
     working: float = 0.0
+    #: Crafting machines in the design; see `flow.Flow.machines`. The same
+    #: caveat `ported` carries for `delivers`, carried for `fed` and `working`.
+    machines: int = 0
     mixed: int = 0
     leaks: int = 0
     within_zone: bool = True
     missing: tuple[str, ...] = ()
+
+    def asks_about_flow(self) -> bool:
+        """Whether `flows()` is a fact about this design or an artefact.
+
+        A balancer has no ports and no machines: nothing was supposed to arrive
+        anywhere, so there is no sense in which it failed to. It is a legality
+        question, it scores 1.000 on the legality tier, and averaging a flow of
+        zero in for it would make the flow number report the composition of the
+        benchmark rather than the state of the model.
+        """
+        return self.valid and (self.ported or bool(self.machines))
 
     def quality(self) -> float:
         """One number for a scatter plot, not for a leaderboard.
@@ -135,6 +149,10 @@ class Report:
         Zero for anything invalid, for the same reason `quality` is: an
         overlapping design cannot be pasted, so what would have flowed through
         it is not a fact about anything.
+
+        Also zero for a design with neither ports nor machines, which is a
+        different kind of nothing — `asks_about_flow` is the one to ask before
+        averaging this, and `summarise` does.
         """
         if not self.valid:
             return 0.0
@@ -161,10 +179,13 @@ class Summary:
     overlap_rate: float = 0.0
     empty_rate: float = 0.0
     spec_rate: float = 0.0
-    #: Averaged over the samples that declared output ports only. `ported` says
-    #: how many those were, so a zero here can be read as "none asked" rather
-    #: than mistaken for "none delivered".
+    #: `mean_delivers` is averaged over the samples that declared output ports;
+    #: `mean_fed` and `mean_working` over the ones with a machine to feed;
+    #: `mean_flow` over either. The three counts are here so a low number can be
+    #: read as "few were asked" rather than mistaken for "few succeeded".
     ported: int = 0
+    crafting: int = 0
+    flowing: int = 0
     mean_delivers: float = 0.0
     mean_fed: float = 0.0
     mean_working: float = 0.0
@@ -365,6 +386,7 @@ def inspect(blueprint: Blueprint, data: Data | None = None, spec: Spec | None = 
         report.delivers = traced.delivers
         report.fed = traced.fed
         report.working = traced.working
+        report.machines = traced.machines
         report.mixed = traced.mixed
         report.leaks = traced.leaks
         report.within_zone = traced.within_zone
@@ -431,6 +453,11 @@ def summarise(reports: list[Report]) -> Summary:
     # of flow, and the two are supposed to be able to disagree.
     built = [report for report in reports if report.valid]
     ported = [report for report in built if report.ported]
+    # And only for designs the question applies to. A belt lane has no machine
+    # to feed, so the zero `fed` it reports is "nothing was asked" — averaging
+    # those in makes the number track how much of the benchmark is machinery.
+    crafting = [report for report in built if report.machines]
+    flowing = [report for report in reports if report.asks_about_flow()]
     return Summary(
         samples=total,
         parse_rate=len(ok) / total,
@@ -444,10 +471,12 @@ def summarise(reports: list[Report]) -> Summary:
         empty_rate=mean(report.entities == 0 for report in reports),
         spec_rate=mean(report.spec_honoured for report in specced) if specced else 0.0,
         ported=len(ported),
+        crafting=len(crafting),
+        flowing=len(flowing),
         mean_delivers=mean(report.delivers for report in ported),
-        mean_fed=mean(report.fed for report in built),
-        mean_working=mean(report.working for report in built),
-        mean_flow=mean(report.flows() for report in built),
+        mean_fed=mean(report.fed for report in crafting),
+        mean_working=mean(report.working for report in crafting),
+        mean_flow=mean(report.flows() for report in flowing),
         leak_rate=mean(bool(report.leaks) for report in built),
         mixed_rate=mean(bool(report.mixed) for report in built),
         zone_rate=mean(report.within_zone for report in ported),

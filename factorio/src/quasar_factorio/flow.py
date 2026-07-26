@@ -64,6 +64,12 @@ class Flow:
     fed: float = 0.0
     #: Crafting machines that are fed *and* whose product leaves them.
     working: float = 0.0
+    #: How many crafting machines there were, which is what says whether `fed`
+    #: and `working` mean anything. A belt lane has none, and a zero it reports
+    #: is "nothing to ask about" rather than "nothing was fed" — averaging the
+    #: two together would make the metric track how much of the benchmark has
+    #: machines in it instead of how many of them work.
+    machines: int = 0
     #: Belts carrying more item types than a belt has lanes.
     mixed: int = 0
     #: Items flowing off the design at a tile no port declared.
@@ -339,6 +345,7 @@ def _report(
         delivers=arrived / len(outputs) if outputs else 0.0,
         fed=len(fed) / len(machines) if machines else 0.0,
         working=len(working) / len(machines) if machines else 0.0,
+        machines=len(machines),
         mixed=mixed,
         leaks=leaks,
         within_zone=within,

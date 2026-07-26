@@ -265,3 +265,33 @@ def test_summaries_average_flow_over_the_designs_that_have_any():
     # a flow failure would make flow a slower, noisier copy of validity.
     assert summary.mean_fed == good.fed
     assert summary.ported == 0
+
+
+def test_a_design_with_no_machines_is_not_averaged_in_as_an_idle_one():
+    """The bug the first GPU run printed: `machines fed 0.234` on a batch whose
+    machines were mostly fine, because most of the batch had no machines.
+
+    `fed` is a fraction with `machines` underneath it, and `trace` reports 0.0
+    when that denominator is zero — the honest answer to a question nobody asked.
+    Averaging those in makes the headline number a measure of how much of the
+    benchmark contains machinery, which is a property of the benchmark.
+    """
+    fed = graded(
+        # Leftmost tile, so the belt runs in from off the edge and is seeded.
+        Placement("transport-belt", 0, 0, EAST),
+        Placement("inserter", 0, 1, SOUTH),
+        Placement("assembling-machine-1", 0, 2, NORTH, recipe="copper-cable"),
+        Placement("medium-electric-pole", 4, 3),
+    )
+    lane = graded(*[Placement("transport-belt", index, 0, EAST) for index in range(4)])
+    assert (fed.machines, fed.fed) == (1, 1.0)
+    assert (lane.machines, lane.fed) == (0, 0.0)
+
+    summary = validate.summarise([fed, lane])
+    assert summary.crafting == 1
+    assert summary.mean_fed == 1.0, "the machine-free lane was counted as an unfed machine"
+    # The lane still has a flow score of its own — `flows()` falls back to `fed`
+    # for an unported design — but it is not a design flow can be asked about,
+    # so it is out of the flow average too rather than half in it.
+    assert not lane.asks_about_flow() and fed.asks_about_flow()
+    assert (summary.flowing, summary.mean_flow) == (1, 1.0)

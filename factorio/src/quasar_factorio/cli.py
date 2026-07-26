@@ -252,7 +252,14 @@ def _grade(args) -> int:
 
     # Reported apart from the block above because it answers a different
     # question. Everything above is legality; this is whether items move.
-    _rule("ITEM FLOW", f"{summary.ported} of {summary.samples} declared ports")
+    # The denominators are on the rule because they are not `samples`: a design
+    # with no machine is not a design whose machines are idle, and a belt lane
+    # averaged in as a zero would report the benchmark's composition instead.
+    _rule(
+        "ITEM FLOW",
+        f"{summary.ported} ported, {summary.crafting} crafting, "
+        f"{summary.flowing} scored of {summary.samples}",
+    )
     flow_rows = [
         ("machines fed", summary.mean_fed),
         ("machines working", summary.mean_working),

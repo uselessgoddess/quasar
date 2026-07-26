@@ -200,13 +200,14 @@ come from; they are unremarkable code with a measured reason.
 ### Where the generators run out
 
 Raising `--count` past that stops helping, and `experiments/saturation.py` says
-where. 3,200 draws from each of the ten generators — 32,000 in all — yield 6,344
-distinct layouts between them:
+where. 3,200 draws from each of the eleven generators — 35,200 in all — yield
+7,579 distinct layouts between them:
 
 | generator | 200 draws | 800 | 3200 | distinct per draw |
 | --- | ---: | ---: | ---: | ---: |
 | belt-lane | 192 | 730 | 2684 | 84% |
 | bus-tap | 183 | 592 | 1400 | 44% |
+| module | 156 | 460 | 1235 | 39% |
 | assembler-row | 181 | 540 | 1021 | 32% |
 | mall-cell | 168 | 404 | 551 | 17% |
 | solar-block | 125 | 210 | 216 | 7% |
@@ -216,17 +217,21 @@ distinct layouts between them:
 | lab-block | 53 | 56 | 56 | 2% |
 | mining-outpost | 37 | 43 | 44 | 1% |
 
-Six of the ten are finished by their four-hundredth draw. A mining outpost has
-44 forms in total, a lab block 56 — every further draw is one of those again.
-Only the belt lane still climbs, and a belt lane is the least interesting thing
-in the corpus: its parameter space is large precisely because nothing constrains
-it. So the synthetic ceiling is roughly 6,300 layouts, about 11M tokens.
+Six of the eleven are finished by their four-hundredth draw. A mining outpost
+has 44 forms in total, a lab block 56 — every further draw is one of those
+again. Two still climb at 3,200: the belt lane, which is the least interesting
+thing in the corpus because its parameter space is large precisely to the extent
+that nothing constrains it, and the module generator, whose space is the product
+of a target item, a zone, and where its ports sit. So the synthetic ceiling is
+roughly 7,600 layouts, about 12M tokens — the eleventh generator moved it by a
+fifth, and it is the only one of the eleven that got there by adding a new thing
+to say rather than a new way to say the same thing.
 
 That is the number the training budget has to be read against. `factorio-nano`
-is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens —
-nearly seven epochs over everything the generators can produce, and nine over
-what a 20,000-draw build contains. Data-constrained scaling laws put the point
-where repeating stops being nearly free at about four epochs, which means a
+is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens — six
+epochs over everything the generators can produce, and eight over what a
+20,000-draw build contains. Data-constrained scaling laws put the point where
+repeating stops being nearly free at about four epochs, which means a
 Chinchilla-budget run needs ~17.6M *unique* tokens and the generators cannot get
 there alone. More variety, not more draws.
 

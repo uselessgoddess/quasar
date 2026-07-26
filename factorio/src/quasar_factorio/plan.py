@@ -198,20 +198,25 @@ def solve(
             raise PlanError(f"{item!r} is not craftable and was not supplied")
         seen = demand.get(item)
         demand[item] = (seen or 0.0) + wanted
-        if seen is None:
-            order.append(item)
         crafts = wanted / recipe.yields(item)
         for name, amount in recipe.ingredients:
             walk(name, crafts * amount, level + 1, (*path, item))
+        if seen is None:
+            # Recorded on the way *out*, not on the way in. Order-of-discovery
+            # reversed is not a topological sort when the graph has cross edges
+            # of different lengths: an arithmetic combinator names cable and
+            # circuit as ingredients in that order, discovers cable first, and
+            # so reversed discovery puts the circuit stage above the cable stage
+            # that feeds it. Appending after the recursion puts every ingredient
+            # in front of the thing it goes into, whatever the shape.
+            order.append(item)
 
     walk(product, rate, 0, ())
     if not order:
         raise PlanError(f"{product!r} was already supplied")
 
     stages = []
-    # Deepest first: an item is only ever appended after everything that wanted
-    # it, so reversing discovery order is a topological sort of the chain.
-    for item in reversed(order):
+    for item in order:
         recipe = recipe_for(data, item)
         assert recipe is not None  # walk would have raised
         machine = machine_for(data, recipe, tier)

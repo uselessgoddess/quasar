@@ -140,6 +140,10 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
     --sheet runs/nano/sheet.png --json runs/nano/grade.json
+
+# the same, over one generator's generations only -- `== GRADE MODULES ==`
+python -m quasar_factorio.cli grade runs/nano/samples.jsonl --kind module
+
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
     --grade runs/nano/samples-*.jsonl
 
@@ -177,6 +181,15 @@ to invent them; a mis-remembered ratio produces a factory that looks perfect and
 starves, and there is no reason to buy a probabilistic version of a table that
 is already exact.
 
+A chain is not always a line. `plan.modules` catalogues 29 targets, and five of
+them branch: the last machine wants two items that both have to be made, which a
+run of stacked bands cannot deliver — a belt hands its product downstream and
+nowhere else, so the first of the two would sail past the row that wants it.
+`plan.fork` splits such a plan into two branches converging on its last stage,
+and `synth` draws them as two bottom-aligned columns dropping onto one belt with
+that stage beneath it. Which of the two layouts a target gets is derived from
+the plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
+
 Two decisions matter more than the rest:
 
 *Nothing invalid gets in.* Every document is graded before it is written, and a
@@ -190,13 +203,19 @@ loss would then be measuring memorisation. Whole designs move together,
 augmentations and all, and "the same design" is decided by a canonical form that
 sees through rotation, reflection and belt tier.
 
-A 20,000-draw build measures 5,415 distinct layouts, 46,340 documents and 9.02M
-training tokens at a 657-token vocabulary. The other 14,585 draws were forms of
-a layout already kept, and 33,660 of the expanded documents came out
-byte-identical to one already written — drawing at random from eleven generators
-collides, and the manifest says by how much. The 6,000 draws
-`examples/factorio.sh` defaults to give 2,729 layouts and 3.46M tokens, already
-more than a 3.5M-parameter model gets through in half an hour.
+*Draws are weighted, not uniform.* `synth.WEIGHTS` gives 45% of the mixture to
+the module generator and the rest to the other ten in proportion — a draw from a
+generator that has run out of things to say costs a draw and adds nothing, and
+`experiments/saturation.py` says which ones those are. `build --module-weight`
+moves that share without touching the proportions among the rest.
+
+A 20,000-draw build measures 10,498 distinct layouts, 66,004 documents and
+14.12M training tokens at a 739-token vocabulary; 4,376 of the layouts are
+modules. The other 9,502 draws were forms of a layout already kept, and 13,996
+of the expanded documents came out byte-identical to one already written —
+drawing from eleven generators collides, and the manifest says by how much. The
+6,000 draws `examples/factorio.sh` defaults to give 4,304 layouts and 4.65M
+tokens, already more than a 3.5M-parameter model gets through in half an hour.
 
 Building it is pure Python and runs before the GPU gets to do anything, so what
 it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and
@@ -210,13 +229,13 @@ come from; they are unremarkable code with a measured reason.
 
 Raising `--count` past that stops helping, and `experiments/saturation.py` says
 where. 3,200 draws from each of the eleven generators — 35,200 in all — yield
-7,579 distinct layouts between them:
+8,362 distinct layouts between them:
 
 | generator | 200 draws | 800 | 3200 | distinct per draw |
 | --- | ---: | ---: | ---: | ---: |
 | belt-lane | 192 | 730 | 2684 | 84% |
+| module | 185 | 636 | 2018 | 63% |
 | bus-tap | 183 | 592 | 1400 | 44% |
-| module | 156 | 460 | 1235 | 39% |
 | assembler-row | 181 | 540 | 1021 | 32% |
 | mall-cell | 168 | 404 | 551 | 17% |
 | solar-block | 125 | 210 | 216 | 7% |
@@ -231,18 +250,18 @@ has 44 forms in total, a lab block 56 — every further draw is one of those
 again. Two still climb at 3,200: the belt lane, which is the least interesting
 thing in the corpus because its parameter space is large precisely to the extent
 that nothing constrains it, and the module generator, whose space is the product
-of a target item, a zone, and where its ports sit. So the synthetic ceiling is
-roughly 7,600 layouts, about 12M tokens — the eleventh generator moved it by a
-fifth, and it is the only one of the eleven that got there by adding a new thing
-to say rather than a new way to say the same thing.
+of a target item, a chain the planner can lay out, a zone, and where its ports
+sit. That table is why the mixture is weighted at all: 20,000 weighted draws
+measure 10,498 layouts where 35,200 flat ones measure 8,362, because the draws
+that would have gone to a generator with 44 forms in it go to the two that are
+still saying something new.
 
 That is the number the training budget has to be read against. `factorio-nano`
-is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens — six
-epochs over everything the generators can produce, and eight over what a
-20,000-draw build contains. Data-constrained scaling laws put the point where
-repeating stops being nearly free at about four epochs, which means a
-Chinchilla-budget run needs ~17.6M *unique* tokens and the generators cannot get
-there alone. More variety, not more draws.
+is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens — five
+epochs over what a 20,000-draw build contains. Data-constrained scaling laws put
+the point where repeating stops being nearly free at about four epochs, which
+means a Chinchilla-budget run needs ~17.6M *unique* tokens and the generators
+still do not quite get there alone. More variety, not more draws.
 
 ### Human blueprints
 
@@ -293,13 +312,13 @@ and a book holds seventeen blueprints on average:
 | larger than 64x64 | 338 |
 
 14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
-mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. The
-generators top out around 11M tokens and the Chinchilla budget is 70.4M, so
-synthetic-only is seven passes over everything they can say, where the
+mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. A
+20,000-draw synthetic build is 14.1M tokens against a Chinchilla budget of
+70.4M, so synthetic-only is five passes over everything it can say, where the
 data-constrained scaling laws put the point at which repeating stops being
-nearly free at four. 11M + 7.8M is 18.8M unique tokens against the 17.6M that
+nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.6M that
 four epochs of the budget need: the human half is not a garnish here, it is what
-moves the run from seven epochs to under four.
+puts the run under four epochs instead of over.
 
 The single largest rejection class is size: what people
 publish is whole factories, and the grammar addresses a 64x64 tile grid with at
@@ -375,6 +394,15 @@ measure different failures, decoration versus a broken chain, and one average
 would let either hide the other — which is exactly how the analysed run ended up
 with a headline number that had nothing left to say. The whole argument, and
 what follows from it, is `docs/FACTORIO.md`.
+
+Averaging over the benchmark hides it a second way, so `--kind` cuts the slice
+out. Ten of the eleven generators come out legal from the first checkpoint, and
+a module that delivers nothing moves `quality` by a fortieth; `grade --kind
+module` scores that generator's generations alone under a `== GRADE MODULES ==`
+rule of their own, and `plot --kind` draws `delivers`, `fed` and `working` over
+that slice as a panel next to loss and perplexity. The filter reads the `kind`
+field `generate` copied out of the prompt record, so nothing has to be matched
+back up to a specification by hand.
 
 Failures are counted by reason, so a run that scores zero still says *why* — and
 the contact sheet is sorted by score rather than sampled, because the

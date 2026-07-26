@@ -28,8 +28,8 @@ steps=${STEPS:-}
 # that decides whether the run fits its budget, not the training length.
 prompts=${PROMPTS:-24}
 backend=${BACKEND:-}
-# Human blueprints, if a cache has been fetched — the generators saturate around
-# 7,600 layouts and the Chinchilla budget wants more than that. Absent, the run
+# Human blueprints, if a cache has been fetched — 20,000 weighted draws are
+# 14.1M tokens and the Chinchilla budget wants 70.4M. Absent, the run
 # is synthetic-only and everything else about it is unchanged, which is what
 # keeps this script runnable on a box with no network.
 #

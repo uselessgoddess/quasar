@@ -29,7 +29,7 @@ ffn             1.8M      activations      120 MiB at micro_batch 1
 total           3.5M      micro_batch in 16 GiB, muon states 135
 ```
 
-Three numbers decide the shape. The vocabulary is **495 tokens** instead of
+Three numbers decide the shape. The vocabulary is **657 tokens** instead of
 32,768, so the embedding costs almost nothing and the whole budget goes into the
 stack. The longest document in the corpus is **460 tokens**, so `seq_len 512`
 holds a whole blueprint and there is nothing past it worth attending to. And
@@ -61,6 +61,28 @@ direction the game uses, and assemblers carry `r:RECIPE` while inserters and
 belts can carry `t:input` or `t:output`. Cutting the line after `</spec>` gives
 a prompt: the model is asked to build something to a specification it has never
 been trained on.
+
+The spec has two optional sections, used by the module task and absent from
+everything the older generators write — a zone with declared inputs and outputs,
+and the recipe chain that fills it:
+
+```
+<bp> <spec> k:module r:electronic-circuit #5 #16 #20
+     <in> i:copper-plate s:n x03 y00
+     <in> i:iron-plate s:n x00 y06
+     <out> i:electronic-circuit s:e x15 y12
+     <plan> assembling-machine-1 r:copper-cable #2
+            assembling-machine-1 r:electronic-circuit #3 </plan>
+     </spec> <e> ... </bp>
+```
+
+A port is the tile it feeds *inside* the design plus the edge it sits on, rather
+than an offset along that edge: the tile rotates exactly like an entity, so
+augmentation cannot desynchronise it from the design, and the model already
+knows what `x03 y00` means where an offset would be a third numbering scheme
+with the same shape as the other two. Being on the edge is what makes a module
+composable — two modules whose ports agree butt together and the belts line up,
+which a design with its inputs somewhere in the middle cannot promise.
 
 Every name in the vocabulary is a real prototype. `assets/prototypes.json` is
 60 entities, 153 items and 212 recipes distilled from Factorio's own `data.raw`
@@ -127,11 +149,24 @@ the ones before it.
 
 ## What the corpus is
 
-Ten generators — smelter columns, assembler rows, mall cells, bus taps,
-balancers, mining outposts, solar and oil blocks, lab blocks, belt lanes — draw
-layouts with real entity footprints, real recipes and real ingredient ratios.
-Each layout is then augmented into its symmetries (four rotations, two
-reflections, belt tiers), which is where most of the documents come from.
+Eleven generators — smelter columns, assembler rows, mall cells, bus taps,
+balancers, mining outposts, solar and oil blocks, lab blocks, belt lanes and
+modules — draw layouts with real entity footprints, real recipes and real
+ingredient ratios. Each layout is then augmented into its symmetries (four
+rotations, two reflections, belt tiers), which is where most of the documents
+come from.
+
+The eleventh is the one the rest of this harness is now aimed at, and it is not
+drawn the way the others are. `plan.solve` expands "electronic circuits, given
+iron and copper plate" into a chain of recipes and whole numbers of machines by
+reading `assets/prototypes.json` — the same ingredient lists, craft times and
+machine speeds the game uses — and `synth.module` places what the planner
+counted. The split is a compiler's: the planner is the front end and decides
+*what* to build, the model is the back end and decides *where it goes*. The plan
+rides in the prompt, so the model is conditioned on the ratios rather than asked
+to invent them; a mis-remembered ratio produces a factory that looks perfect and
+starves, and there is no reason to buy a probabilistic version of a table that
+is already exact.
 
 Two decisions matter more than the rest:
 
@@ -146,13 +181,21 @@ loss would then be measuring memorisation. Whole designs move together,
 augmentations and all, and "the same design" is decided by a canonical form that
 sees through rotation, reflection and belt tier.
 
-A 20,000-draw build measures 4,408 distinct layouts, 38,405 documents and 7.46M
-training tokens at a 495-token vocabulary. The other 15,592 draws were forms of
-a layout already kept, and 41,595 of the expanded documents came out
-byte-identical to one already written — drawing at random from ten generators
+A 20,000-draw build measures 5,415 distinct layouts, 43,810 documents and 8.51M
+training tokens at a 657-token vocabulary. The other 14,585 draws were forms of
+a layout already kept, and 33,274 of the expanded documents came out
+byte-identical to one already written — drawing at random from eleven generators
 collides, and the manifest says by how much. The 6,000 draws
-`examples/factorio.sh` defaults to give 2,439 layouts and 3.17M tokens, already
+`examples/factorio.sh` defaults to give 2,729 layouts and 3.29M tokens, already
 more than a 3.5M-parameter model gets through in half an hour.
+
+Building it is pure Python and runs before the GPU gets to do anything, so what
+it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and
+the answer is that the generators are not it. Almost all of the time goes into
+deduplication — `augment.canonical` puts every design through eight rigid
+motions to compare them, and each of those rebuilds every `Placement` three
+times over. That is where `Placement.moved` and the running-minimum `bounds`
+come from; they are unremarkable code with a measured reason.
 
 ### Where the generators run out
 
@@ -277,6 +320,47 @@ constraints and the soft ones:
 | `inserters connected` | an inserter with something on both sides |
 | `belts lead somewhere` | a belt whose next tile is not empty ground |
 | `quality` | zero if invalid, else the mean of the three above |
+
+Everything in that table is a property of a tidy arrangement, and the run in
+issue #17 finished with five of the six at 1.000. `experiments/grader_blindspots.py`
+is what that turned out to mean: take module draws the grader calls flawless,
+break exactly one thing, and ask again. Over 200 draws —
+
+| perturbation | valid | quality | perfect | flow |
+| --- | ---: | ---: | ---: | ---: |
+| untouched | 1.000 | 1.000 | 1.000 | 1.000 |
+| one assembler retargeted to a recipe the belts do not carry | 1.000 | 1.000 | **1.000** | 0.373 |
+| one inserter turned end for end | 1.000 | 1.000 | **1.000** | 0.422 |
+| the inserter that takes the product away deleted | 1.000 | 1.000 | **1.000** | 0.422 |
+
+— `perfect` being the fraction scoring 1.0 on *every* metric above. It is 1.000
+in all three rows: a factory that provably cannot work scores a perfect mark.
+So there is a second tier, which asks whether items can reach the machines
+rather than whether the arrangement is legal:
+
+| | |
+| --- | --- |
+| `fed` | fraction of machines whose ingredients can actually reach them |
+| `delivers` | the declared output leaves through the declared port |
+| `working` | machines that are both fed and can hand their product on |
+| `mixed` | belts carrying more than the two item types a belt holds |
+| `leaks` | a belt spilling an item off the edge at no declared port |
+| `within zone` | nothing outside the zone the spec asked for |
+| `flow` | zero if invalid, else `0.7 delivers + 0.3 fed` |
+
+`flow.py` computes it as a fixed point over item sets, by the game's rules and
+not by intuition: an inserter faces the tile it inserts *into* and picks up from
+the opposite one, a belt leads into the tile it faces, a belt feeds another belt
+and never a machine, and a belt holds at most two item types. It is deliberately
+optimistic — throughput, belt sides and furnace fuel are not modelled — because
+its job is to separate a factory that works from one that is decorative, which
+the table above says the first tier cannot do.
+
+`flow()` is reported *beside* `quality()` and never folded into it. The two
+measure different failures, decoration versus a broken chain, and one average
+would let either hide the other — which is exactly how the analysed run ended up
+with a headline number that had nothing left to say. The whole argument, and
+what follows from it, is `docs/FACTORIO.md`.
 
 Failures are counted by reason, so a run that scores zero still says *why* — and
 the contact sheet is sorted by score rather than sampled, because the

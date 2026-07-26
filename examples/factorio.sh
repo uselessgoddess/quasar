@@ -150,11 +150,13 @@ samples = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().sp
 
 
 def rank(sample):
-    # Quality first, entity count second. A good run has a dozen generations
-    # scoring a flat 1.0, and picking whichever of them came first would put a
-    # six-entity mall cell forward when a 68-entity bus tap scored the same.
+    # Flow first, then quality, then entity count. Quality alone was the whole
+    # ranking until the run analysed in docs/FACTORIO.md finished with a dozen
+    # generations at a flat 1.0 -- at which point the tie-break is doing all the
+    # work and "best" means "biggest". Flow asks whether the thing would make
+    # anything, which is a question the ceiling has not been reached on.
     report = validate.grade(sample["text"], data)
-    return report.quality(), report.entities
+    return report.flows(), report.quality(), report.entities
 
 
 ranked = sorted(samples, key=rank, reverse=True)

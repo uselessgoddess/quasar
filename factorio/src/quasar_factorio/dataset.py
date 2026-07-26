@@ -83,17 +83,20 @@ def designs(
     seed: int = 0,
     data: Data | None = None,
     variants: int = 4,
+    weights: dict[str, float] | None = None,
 ) -> Iterator[Design]:
     """`count` drawn designs, each expanded into up to `variants` documents.
 
     The per-design RNG is seeded from the design index rather than shared, so a
     corpus of 10,000 designs contains the first 1,000 of a corpus of 1,000 —
     which makes a small run an honest preview of a large one.
+
+    `weights` overrides `synth.WEIGHTS`; see `synth.mixture`.
     """
     data = data or load()
     for index in range(count):
         rng = random.Random(seed * 1_000_003 + index)
-        blueprint, spec = synth.sample(rng, data)
+        blueprint, spec = synth.sample(rng, data, weights)
         design = Design(kind=spec.kind, blueprint=blueprint, spec=spec)
         for form, form_spec in augment.variants(blueprint, spec, data, rng=rng, limit=variants):
             design.documents.append(grammar.serialise(form, data, form_spec))
@@ -110,6 +113,7 @@ def build(
     extra: Iterator[Design] | None = None,
     valid_every: int = VALID_EVERY,
     prompts: int = 256,
+    weights: dict[str, float] | None = None,
 ) -> Stats:
     """Write `out/train`, `out/valid`, `out/tokenizer.json` and `out/manifest.json`.
 
@@ -134,7 +138,7 @@ def build(
     seen: set[bytes] = set()
     held: list[Design] = []
 
-    stream = designs(count, seed=seed, data=data, variants=variants)
+    stream = designs(count, seed=seed, data=data, variants=variants, weights=weights)
     for design in _chain(stream, extra):
         # Two draws that differ only by a turn, a flip or a belt tier are one
         # design; splitting them apart would put one in each split. See

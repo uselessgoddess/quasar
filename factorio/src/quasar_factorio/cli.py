@@ -63,6 +63,14 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--valid-every", type=int, default=dataset.VALID_EVERY)
     build.add_argument("--prompts", type=int, default=256, help="held-out eval prompts")
     build.add_argument(
+        "--module-weight",
+        type=float,
+        default=0.45,
+        metavar="SHARE",
+        help="fraction of the draws spent on the module task; the rest of the "
+        "mixture keeps its proportions (default: 0.45)",
+    )
+    build.add_argument(
         "--real",
         type=pathlib.Path,
         help="also mix in human blueprints from a cache written by tools/fetch_blueprints.py",
@@ -165,6 +173,7 @@ def _build(args) -> int:
         extra=extra,
         valid_every=args.valid_every,
         prompts=args.prompts,
+        weights=synth.mixture(args.module_weight),
     )
     _rule("CORPUS", str(args.out))
     _rows(

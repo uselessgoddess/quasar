@@ -728,11 +728,20 @@ class Layout:
 
     @classmethod
     def draw(cls, rng: random.Random) -> Layout:
-        """Biased toward the tight packing, because that is what players build."""
+        """Biased toward the tight packing, because that is what players build.
+
+        The ranges are wider than the packing alone would justify. Spacing is
+        the axis `augment.canonical` cannot see through, so it is the axis that
+        decides how many distinct designs the generator has in it at all, and a
+        third value of gap and margin and two more of cadence buy a fifth again
+        as many — measured, at 1600 draws, 960 designs against 1164.
+        """
         return cls(
-            gap=rng.choices((0, 1, 2), weights=(5, 3, 2))[0],
-            margin=rng.choices((0, 1, 2), weights=(5, 3, 2))[0],
-            cadence=rng.randint(4, 6),
+            gap=rng.choices((0, 1, 2, 3), weights=(5, 3, 2, 2))[0],
+            margin=rng.choices((0, 1, 2, 3), weights=(5, 3, 2, 2))[0],
+            # A medium pole covers three tiles either side of itself, so seven
+            # is the widest cadence that still powers every column between two.
+            cadence=rng.randint(3, 7),
             align=rng.choice(("left", "centre", "right")),
         )
 
@@ -1274,34 +1283,70 @@ GENERATORS: dict[str, Generator] = {
     "bus-tap": bus_tap,
 }
 
-# How often each template is drawn. The weights are not uniform: the layouts a
-# player would call "a factory" — smelters, assembler rows, malls — are worth
-# more of the corpus than belt lanes, which the model masters in a few hundred
-# steps and then keeps being taught.
+# How often each template is drawn. The weights are not uniform, and they are
+# not a judgement about which layout is prettiest — they are read off
+# `experiments/saturation.py`, which counts how many *distinct* designs each
+# generator has left to give. `dataset.build` deduplicates on
+# `augment.canonical`, so a draw from a saturated generator costs a draw and
+# adds nothing.
+#
+# Three of them saturate almost immediately: mining-outpost has 44 forms in it,
+# lab-block 56, smelter-column 68, and all three are exhausted by the four
+# hundredth draw. They keep a small weight rather than none — the corpus should
+# still contain a drill outpost — but a weight large enough to matter would buy
+# nothing but duplicates.
 #
 # `module` is the heaviest by a wide margin because it is the only task in the
 # mixture that is not already solved. The measured run put every other metric
-# above 0.97 and then had nothing left to learn from those templates; a quarter
-# of the corpus being the unsolved task is what makes the next run's loss curve
-# mean something.
+# above 0.97 and then had nothing left to learn from those templates; nearly
+# half of the corpus being the unsolved task is what makes the next run's loss
+# curve mean something. `mixture` is how that share is set from the outside.
 WEIGHTS = {
-    "module": 26,
-    "belt-lane": 6,
-    "smelter-column": 14,
-    "assembler-row": 16,
-    "mall-cell": 12,
-    "mining-outpost": 10,
-    "lab-block": 8,
-    "solar-block": 6,
-    "balancer": 6,
-    "oil-block": 8,
-    "bus-tap": 8,
+    # 45% of the mixture, which is what `mixture(0.45)` also asks for: the
+    # default weights and the default flag say the same thing.
+    "module": 50,
+    # The rest, ranked by what each still has to say. belt-lane leads on merit
+    # and not on difficulty: at 84% yield it is the only other generator whose
+    # curve is still climbing at three thousand draws, and a draw that adds a
+    # design the corpus did not have is worth more than a draw that adds a
+    # duplicate of a harder one.
+    "belt-lane": 20,
+    "bus-tap": 12,
+    "assembler-row": 12,
+    "mall-cell": 7,
+    "solar-block": 3,
+    "oil-block": 2,
+    "balancer": 2,
+    "smelter-column": 1,
+    "lab-block": 1,
+    "mining-outpost": 1,
 }
 
 
-def sample(rng: random.Random, data: Data | None = None) -> tuple[Blueprint, Spec]:
+def mixture(module: float) -> dict[str, float]:
+    """`WEIGHTS` rescaled so that `module` takes that share of the draws.
+
+    The other generators keep their proportions to each other, so asking for a
+    heavier module share is a statement about the module task alone and not a
+    silent re-ranking of everything else. `module=0.0` drops it from the
+    mixture; anything at or above 1.0 is refused rather than quietly leaving
+    the rest of the corpus empty.
+    """
+    if not 0.0 <= module < 1.0:
+        raise ValueError(f"module share must be in [0, 1), not {module}")
+    rest = sum(weight for kind, weight in WEIGHTS.items() if kind != "module")
+    scale = (module / (1.0 - module)) * rest if module else 0.0
+    return {kind: scale if kind == "module" else float(weight) for kind, weight in WEIGHTS.items()}
+
+
+def sample(
+    rng: random.Random,
+    data: Data | None = None,
+    weights: dict[str, float] | None = None,
+) -> tuple[Blueprint, Spec]:
     """Draw one blueprint from the weighted mixture of templates."""
     data = data or load()
-    names = list(GENERATORS)
-    kind = rng.choices(names, weights=[WEIGHTS[name] for name in names])[0]
+    weights = weights or WEIGHTS
+    names = [name for name in GENERATORS if weights.get(name, 0)]
+    kind = rng.choices(names, weights=[weights[name] for name in names])[0]
     return GENERATORS[kind](rng, data)

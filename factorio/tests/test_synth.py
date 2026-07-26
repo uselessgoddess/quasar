@@ -10,7 +10,7 @@ import random
 
 import pytest
 
-from quasar_factorio import flow, grammar, plan, prototypes, synth, validate
+from quasar_factorio import augment, flow, grammar, plan, prototypes, synth, validate
 from quasar_factorio.blueprint import GRID
 
 DATA = prototypes.load()
@@ -143,6 +143,21 @@ def test_a_module_port_sits_on_a_belt_at_the_edge_it_names():
             placement = occupied.get((port.x, port.y))
             assert placement is not None, port
             assert DATA.entity(placement.name).category in flow.BELTS, port
+
+
+def test_the_module_generator_does_not_run_out_of_layouts():
+    """Counted the way the corpus builder counts, which is the only way that pays.
+
+    A generator that draws the same design twice contributes it once: the build
+    deduplicates on `augment.canonical`, which sees through rotation, reflection
+    and tier. Before `synth.Layout` the module generator varied nothing else, so
+    twenty catalogue entries times a couple of machine budgets was the whole of
+    it — forty-five designs, and the thousandth draw added nothing to the corpus
+    that the fiftieth had not. This is the assertion that keeps that from
+    quietly coming back; `experiments/module_yield.py` prints the curve.
+    """
+    keys = {augment.canonical(blueprint, DATA) for blueprint, _ in draw(synth.module, 200)}
+    assert len(keys) > 120
 
 
 def test_a_module_plan_is_the_planner_s_plan_and_not_a_guess():

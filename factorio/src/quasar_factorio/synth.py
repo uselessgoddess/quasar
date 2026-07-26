@@ -24,7 +24,7 @@ from __future__ import annotations
 import functools
 import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import plan as planner
 from .augment import oriented
@@ -680,11 +680,61 @@ def bus_tap(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
 #: which would teach the model that blueprints sometimes just stop.
 MODULE_ENTITIES = 70
 
+#: Modules are wired with medium poles and no choice about it. A small pole
+#: covers 5x5, and the bottom row of inserters of the last stage sits four tiles
+#: below the row of poles that has to reach it — exactly the medium pole's
+#: limit, and one tile past the small one's. Offering a tier that silently
+#: unpowers the output row of every assembler module is not variety.
+MODULE_POLE = "medium-electric-pole"
+
 
 @functools.cache
 def _module_targets(data: Data) -> tuple[planner.Module, ...]:
     """Every product a stacked-band module can make, with what it is handed."""
     return planner.modules(data)
+
+
+@dataclass(frozen=True)
+class Layout:
+    """How a module is spaced out, as opposed to what it builds.
+
+    Without these the generator was a lookup table: the catalogue has twenty
+    entries and the machine budget only two or three settings, so it saturated
+    at forty-five distinct designs and every draw after the first few hundred
+    was a duplicate the deduplicator threw away. Measured by
+    `experiments/module_yield.py`.
+
+    A knob only counts if `augment.canonical` cannot see through it, which rules
+    out the obvious two: it downgrades every belt, inserter and machine to the
+    bottom of its upgrade chain before comparing, so tier randomisation adds
+    nothing, and it takes the minimum over the dihedral group, so rotating and
+    mirroring add nothing either. What survives is where things sit — spacing,
+    alignment, pole cadence, and which way along the row each belt runs.
+    """
+
+    #: Spare columns between neighbouring machines in a stage.
+    gap: int
+    #: Columns of belt beyond the widest stage, so the zone is not skin-tight.
+    margin: int
+    #: How far apart poles go along a row of inserters.
+    cadence: int
+    #: Where a stage narrower than the widest one sits: `left`, `centre`, `right`.
+    align: str
+
+    @classmethod
+    def draw(cls, rng: random.Random) -> Layout:
+        """Biased toward the tight packing, because that is what players build."""
+        return cls(
+            gap=rng.choices((0, 1, 2), weights=(5, 3, 2))[0],
+            margin=rng.choices((0, 1, 2), weights=(5, 3, 2))[0],
+            cadence=rng.randint(4, 6),
+            align=rng.choice(("left", "centre", "right")),
+        )
+
+    def offset(self, span: int, width: int) -> int:
+        """Where a stage of `span` columns starts inside a `width`-wide module."""
+        pad = width - span
+        return {"left": 0, "centre": pad // 2, "right": pad}[self.align]
 
 
 def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
@@ -698,46 +748,52 @@ def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     A two-stage chain stacks two of those and the intermediate never touches the
     module boundary at all.
 
-    Raw ingredients enter on the left of whichever stage needs them, which is why
-    `plan.modules` rejects a chain whose stage wants more raws than a belt has
-    lanes. The finished product leaves at the far end of the bottom belt, and
-    that tile is the only place anything crosses the edge: every other belt row
-    stops one column short and ends against a pole, so nothing spills into
-    whatever the player puts next to this.
+    Raw ingredients enter at the upstream end of whichever stage needs them,
+    which is why `plan.modules` rejects a chain whose stage wants more raws than
+    a belt has lanes. The finished product leaves at the far end of the bottom
+    belt, and that tile is the only place anything crosses the edge: every other
+    belt row stops one column short and ends against a pole, so nothing spills
+    into whatever the player puts next to this.
+
+    Everything the layout is free to choose lives in :class:`Layout`, plus the
+    direction each belt row runs, which is drawn per row rather than per design:
+    flipping every row together is a mirror image and the augmenter already
+    produces those, while flipping one row is a design the corpus has not seen.
+    Which flips are available is geometry and not taste — see `_runs`.
     """
     target = rng.choice(_module_targets(data))
     product, supply = target.product, target.supply
     unit = planner.solve(data, product, supply, rate=1e-9, depth=target.depth)
-    stages = _budgeted(data, target, unit, rng)
+    layout = Layout.draw(rng)
+    stages = _budgeted(data, target, unit, rng, layout)
 
     tier = _tier(rng)
     belt = BELTS[tier]
     inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
     canvas = Canvas.new(data)
-    width = max(stage.count * data.entities[stage.machine].width for stage in stages)
+    width = _module_width(data, stages, layout)
+    columns = _columns(data, stages, layout, width)
+    runs = _runs(rng, columns, width)
 
     ports: list[Port] = []
     row = 0
-    for stage in stages:
+    for index, stage in enumerate(stages):
         proto = data.entities[stage.machine]
         # One column short of the edge: the belt is internal plumbing, and a
         # belt that reached the boundary would be an undeclared port.
-        canvas.line(belt, 0, row, width - 1, EAST)
-        canvas.maybe("medium-electric-pole", width - 1, row)
-        for index in range(stage.count):
-            x = index * proto.width
+        head, _, side = _belt_row(canvas, belt, row, width, runs[index], full=False)
+        for x in columns[index]:
             canvas.place(inserter, x, row + 1, SOUTH)
             canvas.place(stage.machine, x, row + 2, recipe=stage.recipe)
             canvas.place(inserter, x, row + 2 + proto.height, SOUTH)
-        for x in range(1, width, 6):
-            canvas.maybe("medium-electric-pole", x, row + 1)
+        _power_row(canvas, row + 1, width, layout.cadence)
         for item in dict.fromkeys(stage.ingredients):
             if item in supply:
-                ports.append(Port("in", item, 0, row, "w"))
+                ports.append(Port("in", item, head, row, side))
         row += 3 + proto.height
 
-    canvas.line(belt, 0, row, width, EAST)
-    ports.append(Port("out", product, width - 1, row, "e"))
+    _, tail, side = _belt_row(canvas, belt, row, width, runs[-1], full=True)
+    ports.append(Port("out", product, tail, row, "e" if side == "w" else "w"))
 
     blueprint = canvas.build(f"{product} module")
     steps = tuple(stage.step() for stage in stages)
@@ -749,7 +805,124 @@ def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     return _module_spec(blueprint, ports, steps, product, slack, rng, data)
 
 
-def _budgeted(data: Data, target: planner.Module, unit, rng: random.Random):
+def _belt_row(
+    canvas: Canvas, belt: str, row: int, width: int, direction: int, full: bool
+) -> tuple[int, int, str]:
+    """One belt row of a module, and the two ends items travel between.
+
+    Returns the upstream column, the downstream column and the side the
+    upstream end is on, because that is what a port needs: an item put on the
+    downstream end of a belt has already left, so an input port belongs at the
+    head and an output port at the tail.
+
+    A `full` row spans the whole width and its tail points off the edge, which
+    is the module's one deliberate opening. Every other row stops a column short
+    and butts against a pole, so the belt leads somewhere without leaking.
+    """
+    length = width if full else width - 1
+    step = 1 if direction == EAST else -1
+    head = 0 if direction == EAST else width - 1
+    canvas.line(belt, head, row, length, direction)
+    if not full:
+        canvas.maybe(MODULE_POLE, head + step * length, row)
+    return head, head + step * (length - 1), "w" if direction == EAST else "e"
+
+
+def _power_row(canvas: Canvas, row: int, width: int, cadence: int) -> None:
+    """Poles along a row of inserters, at the first free column each cadence.
+
+    Stepping blindly and giving up when the tile is taken leaves holes: machines
+    packed edge to edge put an inserter on every third column, so a cadence of
+    six lands on one every other time and the machines past it lose power.
+    Sliding to the next free column keeps the run unbroken, and since a run of
+    occupied columns is never longer than a machine is wide, it never slides far
+    enough to open a gap the next pole cannot cover.
+    """
+    last = -cadence
+    for x in range(width):
+        if x - last >= cadence and canvas.maybe(MODULE_POLE, x, row):
+            last = x
+
+
+def _columns(data: Data, stages, layout: Layout, width: int) -> list[list[int]]:
+    """Which columns each stage's machines stand in.
+
+    Alignment is a per-design choice, so a stage narrower than the widest one is
+    the only stage it moves, and moving it is what makes two draws of the same
+    plan two different designs. Centring is given up on when it would strand a
+    row — see `_directions` — because a layout that cannot be belted is not a
+    variant of this design, it is a broken one.
+    """
+    columns = _placed(data, stages, layout, width)
+    if all(_directions(columns, row, width) for row in range(len(columns) + 1)):
+        return columns
+    return _placed(data, stages, replace(layout, align="left"), width)
+
+
+def _placed(data: Data, stages, layout: Layout, width: int) -> list[list[int]]:
+    columns = []
+    for stage in stages:
+        proto = data.entities[stage.machine]
+        span = stage.count * proto.width + (stage.count - 1) * layout.gap
+        offset = layout.offset(span, width)
+        stride = proto.width + layout.gap
+        columns.append([offset + index * stride for index in range(stage.count)])
+    return columns
+
+
+def _directions(columns: list[list[int]], row: int, width: int) -> tuple[int, ...]:
+    """Which ways belt row `row` may flow, on the two counts that decide it.
+
+    *Reach.* A belt hands items downstream and nowhere else, so every machine
+    dropping onto a row has to have one upstream of every machine picking up
+    from it: eastward needs the leftmost drop no further right than the leftmost
+    pickup, westward the mirror image. The top row has no drops and the bottom
+    row no pickups, so neither is constrained this way.
+
+    *The end pole.* An internal row stops a column short and butts against a
+    pole, and the column it stops at is the downstream one — column 0 for a
+    westward row. An inserter standing over that column would reach past the
+    belt entirely and try to take items out of the pole, so a row whose end
+    lands under a machine cannot run that way. Aligned left, that rules out
+    westward for every internal row, which is why the margin is worth drawing:
+    one spare column at the edge is what buys the flip.
+
+    Centring a narrow stage over a wide one is the case that can leave neither
+    direction working, with the drops strictly inside the span of the pickups.
+    Aligning both stages to the same edge always leaves eastward, which is why
+    `_columns` falls back there rather than emitting a module that starves.
+    """
+    drops = columns[row - 1] if row else []
+    pickups = columns[row] if row < len(columns) else []
+    allowed = []
+    for direction in (EAST, WEST):
+        end = width - 1 if direction == EAST else 0
+        if row < len(columns) and end in set(drops) | set(pickups):
+            continue
+        if drops and pickups:
+            reaches = (
+                min(drops) <= min(pickups) if direction == EAST else max(drops) >= max(pickups)
+            )
+            if not reaches:
+                continue
+        allowed.append(direction)
+    return tuple(allowed)
+
+
+def _runs(rng: random.Random, columns: list[list[int]], width: int) -> list[int]:
+    """A flow direction per belt row, drawn from the ones that reach."""
+    return [rng.choice(_directions(columns, row, width)) for row in range(len(columns) + 1)]
+
+
+def _module_width(data: Data, stages, layout: Layout) -> int:
+    """Wide enough for the widest stage, plus whatever margin was asked for."""
+    return layout.margin + max(
+        stage.count * data.entities[stage.machine].width + (stage.count - 1) * layout.gap
+        for stage in stages
+    )
+
+
+def _budgeted(data: Data, target: planner.Module, unit, rng: random.Random, layout: Layout):
     """The largest plan whose layout still fits `MODULE_ENTITIES`.
 
     Searched downwards from a random ambition rather than solved: the entity
@@ -763,18 +936,25 @@ def _budgeted(data: Data, target: planner.Module, unit, rng: random.Random):
             )
         except planner.PlanError:
             continue
-        if _entities(data, candidate.stages) <= MODULE_ENTITIES:
+        if _entities(data, candidate.stages, layout) <= MODULE_ENTITIES:
             return candidate.stages
     return unit.stages
 
 
-def _entities(data: Data, stages) -> int:
-    """What `module` will place, without placing it."""
-    width = max(stage.count * data.entities[stage.machine].width for stage in stages)
-    total = width  # the output belt
+def _entities(data: Data, stages, layout: Layout) -> int:
+    """What `module` will place, without placing it.
+
+    An upper bound rather than a count: `_power_row` slides its poles past
+    occupied columns and may fit one fewer than the cadence suggests. Over-
+    estimating costs a machine off the plan; under-estimating costs a truncated
+    document, which teaches the model that a blueprint can simply stop.
+    """
+    width = _module_width(data, stages, layout)
+    poles = -(-width // layout.cadence)
+    total = width  # the output belt, which runs the full width
     for stage in stages:
-        # belt, end pole, three entities a machine, a pole every six columns
-        total += (width - 1) + 1 + 3 * stage.count + len(range(1, width, 6))
+        # belt, end pole, three entities a machine, and the poles over them
+        total += (width - 1) + 1 + 3 * stage.count + poles
     return total
 
 

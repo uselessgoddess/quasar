@@ -10,7 +10,7 @@ import random
 
 import pytest
 
-from quasar_factorio import grammar, prototypes, synth, validate
+from quasar_factorio import flow, grammar, plan, prototypes, synth, validate
 from quasar_factorio.blueprint import GRID
 
 DATA = prototypes.load()
@@ -99,3 +99,69 @@ def test_recipes_are_only_ever_paired_with_machines_that_can_run_them():
     for index in range(300):
         blueprint, _ = synth.sample(random.Random(index), DATA)
         assert validate.illegal_recipes(blueprint, DATA) == 0
+
+
+def test_every_module_draw_makes_the_item_it_advertises():
+    """The contract the other generators cannot be held to.
+
+    A belt lane or a mall row is legal or it is not; a module additionally has to
+    *work*, and that is checkable because the spec says what goes in and what
+    should come out. Anything less than 1.0 here means the corpus is teaching a
+    layout that starves, which is precisely the failure the local metrics missed.
+    """
+    for blueprint, spec in draw(synth.module, 120):
+        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+        assert report.ported, spec.product
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0), spec.product
+        assert (report.mixed, report.leaks) == (0, 0), spec.product
+        assert report.within_zone, spec.product
+
+
+def test_a_module_declares_a_port_for_everything_it_is_handed_and_makes():
+    for _, spec in draw(synth.module, 60):
+        assert spec.outputs()
+        assert {port.item for port in spec.outputs()} == {spec.product}
+        # Every input port names an item some stage of the plan actually takes,
+        # so no port in the prompt is a promise the design cannot use.
+        wanted = set()
+        for step in spec.plan:
+            recipe = DATA.recipes[step.recipe]
+            wanted |= {name for name, _ in recipe.ingredients}
+        assert {port.item for port in spec.inputs()} <= wanted
+
+
+def test_a_module_port_sits_on_a_belt_at_the_edge_it_names():
+    edges = {"n": lambda x, y, w, h: y == 0, "s": lambda x, y, w, h: y == h - 1}
+    edges |= {"w": lambda x, y, w, h: x == 0, "e": lambda x, y, w, h: x == w - 1}
+    for blueprint, spec in draw(synth.module, 60):
+        width, height = blueprint.extent(DATA)
+        occupied = {
+            tile: placement for placement in blueprint.entities for tile in placement.tiles(DATA)
+        }
+        for port in spec.ports:
+            assert edges[port.side](port.x, port.y, width, height), port
+            placement = occupied.get((port.x, port.y))
+            assert placement is not None, port
+            assert DATA.entity(placement.name).category in flow.BELTS, port
+
+
+def test_a_module_plan_is_the_planner_s_plan_and_not_a_guess():
+    for _, spec in draw(synth.module, 40):
+        supply = {port.item for port in spec.inputs()}
+        # Matched as a set: the ports come out in layout order, which is the
+        # order the belts are stacked in and not the order the catalogue lists.
+        catalogued = [
+            module
+            for module in plan.modules(DATA)
+            if module.product == spec.product and set(module.supply) == supply
+        ]
+        assert catalogued, (spec.product, supply)
+        machines = sum(step.count for step in spec.plan)
+        unit = plan.fit(
+            DATA,
+            spec.product,
+            catalogued[0].supply,
+            machines=machines,
+            depth=catalogued[0].depth,
+        )
+        assert unit.steps() == spec.plan

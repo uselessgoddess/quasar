@@ -91,6 +91,22 @@ def test_augmenting_never_degrades_a_design(kind):
     assert summary.mean_belts == 1.0
 
 
+def test_a_rotated_module_still_delivers_through_its_rotated_ports():
+    """The reason a port is a tile and a side rather than a name for an edge.
+
+    Rotate the design and the ports have to follow it exactly, or the prompt now
+    promises iron plate arriving somewhere the belt no longer is — and the
+    document teaches the model that the ports in its prompt mean nothing.
+    """
+    for seed in range(12):
+        rng = random.Random(seed)
+        blueprint, spec = synth.module(rng, DATA)
+        for form, form_spec in augment.variants(blueprint, spec, DATA, rng=rng, limit=8):
+            report = validate.grade(grammar.serialise(form, DATA, form_spec), DATA)
+            assert (report.delivers, report.fed) == (1.0, 1.0), (seed, form_spec.product)
+            assert report.within_zone
+
+
 def test_a_symmetric_design_collapses_instead_of_duplicating():
     """A straight belt lane has four orientations, not eight.
 

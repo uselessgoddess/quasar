@@ -13,7 +13,7 @@ import base64
 import json
 import math
 import zlib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from .prototypes import EAST, NORTH, SOUTH, WEST, Data, load
 
@@ -39,6 +39,30 @@ class Placement:
     #: `"input"` or `"output"` for underground belts, `None` for everything else.
     flow: str | None = None
 
+    def moved(self, x: int, y: int, direction: int | None = None) -> Placement:
+        """This placement somewhere else, and optionally facing elsewhere.
+
+        `dataclasses.replace` says the same thing and is the obvious way to
+        write it, but it re-derives the field list and dispatches through
+        keywords on every call. Rotating, mirroring and re-normalising a corpus
+        builds a few million of these — `augment.canonical` alone makes
+        twenty-four passes over every design it is handed — and positional
+        construction is three times faster for no loss of meaning. Measured by
+        `experiments/corpus_cost.py`.
+        """
+        return Placement(
+            self.name,
+            x,
+            y,
+            self.direction if direction is None else direction,
+            self.recipe,
+            self.flow,
+        )
+
+    def renamed(self, name: str) -> Placement:
+        """The same tile with a different prototype on it — a tier change."""
+        return Placement(name, self.x, self.y, self.direction, self.recipe, self.flow)
+
     def size(self, data: Data) -> tuple[int, int]:
         proto = data.entity(self.name)
         if proto is None:
@@ -61,14 +85,32 @@ class Blueprint:
     source: str = ""
 
     def bounds(self, data: Data) -> tuple[int, int, int, int]:
-        if not self.entities:
+        """The half-open box the design occupies.
+
+        Written as a running minimum rather than as `min(xs), max(xs)` over two
+        collected lists, which is the shorter way to say it and twice the cost:
+        this is called for every rotation of every design in a corpus, several
+        million times over a build, and the two temporary lists are the whole
+        difference. See `Placement.moved`.
+        """
+        entities = self.entities
+        if not entities:
             return 0, 0, 0, 0
-        xs, ys = [], []
-        for placement in self.entities:
+        width, height = entities[0].size(data)
+        x0, y0 = entities[0].x, entities[0].y
+        x1, y1 = x0 + width, y0 + height
+        for placement in entities:
             width, height = placement.size(data)
-            xs += [placement.x, placement.x + width]
-            ys += [placement.y, placement.y + height]
-        return min(xs), min(ys), max(xs), max(ys)
+            x, y = placement.x, placement.y
+            if x < x0:
+                x0 = x
+            if y < y0:
+                y0 = y
+            if x + width > x1:
+                x1 = x + width
+            if y + height > y1:
+                y1 = y + height
+        return x0, y0, x1, y1
 
     def extent(self, data: Data) -> tuple[int, int]:
         x0, y0, x1, y1 = self.bounds(data)
@@ -83,7 +125,7 @@ class Blueprint:
         then column, then name) makes the next token a local question.
         """
         x0, y0, _, _ = self.bounds(data)
-        moved = [replace(e, x=e.x - x0, y=e.y - y0) for e in self.entities]
+        moved = [e.moved(e.x - x0, e.y - y0) for e in self.entities]
         moved.sort(key=lambda e: (e.y, e.x, e.name, e.direction))
         return Blueprint(entities=moved, label=self.label, source=self.source)
 
@@ -268,7 +310,7 @@ def rotate(
         for _ in range(quarters):
             x, y, width, height = -(y + height), x, height, width
         direction = (placement.direction + 2 * quarters) % 8
-        out.append(replace(placement, x=x, y=y, direction=direction))
+        out.append(placement.moved(x, y, direction))
     turned = Blueprint(entities=out, label=blueprint.label, source=blueprint.source)
     return turned.normalised(data) if normalise else turned
 
@@ -290,6 +332,6 @@ def mirror(blueprint: Blueprint, data: Data | None = None, *, normalise: bool = 
     for placement in blueprint.entities:
         direction = _FLIP_X.get(placement.direction, placement.direction)
         width, _ = placement.size(data)
-        out.append(replace(placement, x=-(placement.x + width), direction=direction))
+        out.append(placement.moved(-(placement.x + width), placement.y, direction))
     flipped = Blueprint(entities=out, label=blueprint.label, source=blueprint.source)
     return flipped.normalised(data) if normalise else flipped

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from dataclasses import replace
 
 from .blueprint import Blueprint, mirror, rotate
 from .grammar import Port, Spec
@@ -68,7 +67,7 @@ def canonical(blueprint: Blueprint, data: Data | None = None) -> str:
     data = data or load()
     base = Blueprint(
         entities=[
-            replace(placement, name=BASELINE.get(placement.name, placement.name))
+            placement.renamed(BASELINE.get(placement.name, placement.name))
             for placement in blueprint.entities
         ]
     )
@@ -88,7 +87,7 @@ def retier(blueprint: Blueprint, data: Data | None = None) -> Blueprint | None:
         label=blueprint.label,
         source=blueprint.source,
         entities=[
-            replace(placement, name=UPGRADES.get(placement.name, placement.name))
+            placement.renamed(UPGRADES.get(placement.name, placement.name))
             for placement in blueprint.entities
         ],
     ).normalised(data)

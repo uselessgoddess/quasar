@@ -1,5 +1,7 @@
 """Blueprint strings, coordinates and the symmetry augmentations."""
 
+from dataclasses import fields, replace
+
 import pytest
 
 from quasar_factorio import blueprint as bp
@@ -127,6 +129,47 @@ def test_mirroring_is_its_own_inverse_and_swaps_east_for_west():
     # East becomes west; north is unmoved by a horizontal flip.
     assert sorted(e.direction for e in flipped.entities) == [NORTH, WEST, WEST, WEST]
     assert bp.mirror(flipped, DATA).entities == original.entities
+
+
+def test_a_moved_or_renamed_placement_carries_every_other_field_with_it():
+    """The one thing positional construction can get wrong, asserted directly.
+
+    `Placement.moved` and `.renamed` exist because `dataclasses.replace` costs
+    three times as much and the augmentation pipeline calls it a few million
+    times a build — but `replace` copies whatever fields the class happens to
+    have, and these two name them. A field added to `Placement` and not threaded
+    through here would be dropped silently on every rotation: recipes and
+    underground-belt ends would survive the corpus, and whatever came next would
+    not. Compared against `replace` so the check cannot drift from the class.
+    """
+    original = Placement("underground-belt", 3, 4, EAST, recipe="iron-gear-wheel", flow="input")
+    assert original.moved(9, 2) == replace(original, x=9, y=2)
+    assert original.moved(9, 2, WEST) == replace(original, x=9, y=2, direction=WEST)
+    assert original.renamed("fast-underground-belt") == replace(
+        original, name="fast-underground-belt"
+    )
+    # Every field of the dataclass is either the one being changed or preserved;
+    # this is what fails when a field is added and forgotten.
+    for field in fields(Placement):
+        assert getattr(original.moved(9, 2), field.name) == (
+            {"x": 9, "y": 2}.get(field.name, getattr(original, field.name))
+        )
+
+
+def test_the_bounding_box_is_the_one_the_two_list_version_gave():
+    """`bounds` was rewritten as a running minimum for speed; same answer or bust.
+
+    Every coordinate in the corpus is relative to this box — `normalised` shifts
+    by it — so an off-by-one here would move every design in every rotation.
+    """
+    for design in (sample(), Blueprint(entities=[Placement("assembling-machine-2", 7, 3)])):
+        xs, ys = [], []
+        for placement in design.entities:
+            width, height = placement.size(DATA)
+            xs += [placement.x, placement.x + width]
+            ys += [placement.y, placement.y + height]
+        assert design.bounds(DATA) == (min(xs), min(ys), max(xs), max(ys))
+    assert Blueprint().bounds(DATA) == (0, 0, 0, 0)
 
 
 def test_normalisation_is_idempotent_and_lands_on_the_origin():

@@ -126,8 +126,19 @@ def machine_for(data: Data, recipe: Recipe, tier: int = 0) -> str:
 
 
 def is_fluid(data: Data, item: str) -> bool:
-    """Fluids are the items with no stack size — they need pipes, not belts."""
-    return item not in data.stack_sizes
+    """Whether `item` needs a pipe rather than a belt.
+
+    Asked of the fluid table first and of the stack sizes only as a fallback,
+    because the fallback alone was a bug with a long reach: `data.raw.item`
+    holds gears and plates, but a science pack is a `tool` and a piercing round
+    is `ammo`, so 61 of the items vanilla recipes name had no stack size and
+    every one of them was called a fluid. That silently deleted the entire
+    science branch from `chains` — the planner did not refuse to build green
+    science, it never saw it — which is why the catalogue looked like proof that
+    branching chains were the obstacle. Unknown names still count as fluids so
+    that a typo fails closed rather than being routed onto a belt.
+    """
+    return item in data.fluids or item not in data.stack_sizes
 
 
 def belted(data: Data, item: str) -> bool:

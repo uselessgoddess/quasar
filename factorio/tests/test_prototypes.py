@@ -106,5 +106,29 @@ def test_lookups_find_the_right_machines():
     assert plate and plate[0].category == "smelting"
 
 
+def test_everything_a_recipe_names_is_either_stackable_or_a_fluid():
+    """The item table is swept out of every prototype category, not out of `item`.
+
+    Factorio files a gear under `item`, a science pack under `tool`, a piercing
+    round under `ammo` and a car under `item-with-entity-data`. Distilling only
+    `data.raw.item` left 61 of the 214 things vanilla recipes name with no stack
+    size at all, and the harness reads a missing stack size as "needs a pipe" —
+    so the omission did not surface as missing data, it surfaced as every
+    science pack being a fluid. This is the assertion that would have caught it.
+    """
+    data = prototypes.load()
+    for recipe in data.recipes.values():
+        for name, _ in (*recipe.ingredients, *recipe.results):
+            assert name in data.stack_sizes or name in data.fluids, name
+
+
+def test_the_fluids_are_the_ones_the_dump_calls_fluids():
+    data = prototypes.load()
+    assert {"water", "steam", "crude-oil", "petroleum-gas", "lubricant"} <= data.fluids
+    assert not data.fluids & set(data.stack_sizes)
+    for pack in ("automation-science-pack", "logistic-science-pack", "military-science-pack"):
+        assert data.stack_sizes[pack] == 200, pack
+
+
 def test_the_table_is_a_shared_immutable_singleton():
     assert prototypes.load() is prototypes.load()

@@ -89,6 +89,25 @@ def test_fit_spends_the_whole_machine_budget_and_never_overspends():
         plan.fit(DATA, "electronic-circuit", PLATES, machines=1)
 
 
+def test_a_science_pack_is_belted_and_a_fluid_is_not():
+    """The one that was wrong, and the reason the catalogue had no science in it.
+
+    `is_fluid` used to mean "has no stack size", and the distilled item table
+    only held `data.raw.item` — so a science pack, which Factorio files under
+    `tool`, was a fluid. Nothing raised: `chains` skips fluids silently, so the
+    entire science branch was missing from the catalogue and read as a chain the
+    layout filters had rejected.
+    """
+    for pack in ("automation-science-pack", "logistic-science-pack"):
+        assert not plan.is_fluid(DATA, pack)
+        assert plan.chains(DATA, depth=3).get(pack) is not None, pack
+    for fluid in ("water", "petroleum-gas", "lubricant"):
+        assert plan.is_fluid(DATA, fluid)
+    # A name the table has never heard of still fails closed: better to refuse a
+    # chain than to route a typo onto a belt.
+    assert plan.is_fluid(DATA, "no-such-item")
+
+
 def test_the_module_catalogue_is_not_empty_and_leads_with_the_flagship():
     catalogue = plan.modules(DATA)
     assert len(catalogue) >= 10

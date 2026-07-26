@@ -29,7 +29,7 @@ ffn             1.8M      activations      120 MiB at micro_batch 1
 total           3.5M      micro_batch in 16 GiB, muon states 135
 ```
 
-Three numbers decide the shape. The vocabulary is **657 tokens** instead of
+Three numbers decide the shape. The vocabulary is **739 tokens** instead of
 32,768, so the embedding costs almost nothing and the whole budget goes into the
 stack. The longest document in the corpus is **460 tokens**, so `seq_len 512`
 holds a whole blueprint and there is nothing past it worth attending to. And
@@ -85,10 +85,19 @@ composable — two modules whose ports agree butt together and the belts line up
 which a design with its inputs somewhere in the middle cannot promise.
 
 Every name in the vocabulary is a real prototype. `assets/prototypes.json` is
-60 entities, 153 items and 212 recipes distilled from Factorio's own `data.raw`
-by `tools/distill_data_raw.py`, which records the source URL, the game version
-and the sha256 of the bytes it read — so entity sizes, recipe ingredients and
-crafting times are traceable to the game rather than to somebody's memory of it.
+60 entities, 235 items, 9 fluids and 212 recipes distilled from Factorio's own
+`data.raw` by `tools/distill_data_raw.py`, which records the source URL, the
+game version and the sha256 of the bytes it read — so entity sizes, recipe
+ingredients and crafting times are traceable to the game rather than to
+somebody's memory of it.
+
+The item table is swept out of every prototype category rather than out of
+`data.raw.item`, because Factorio files a science pack under `tool`, a piercing
+round under `ammo` and a speed module under `module`. Reading only `item` missed
+61 of the 214 things vanilla recipes name, and since the harness reads "has a
+stack size" as "a belt can carry it", the missing rows did not read as missing
+data — they read as `automation-science-pack` being a fluid, which deleted the
+whole science branch from the planner's catalogue.
 
 ## Pipeline
 

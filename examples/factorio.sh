@@ -29,7 +29,7 @@ steps=${STEPS:-}
 prompts=${PROMPTS:-24}
 backend=${BACKEND:-}
 # Human blueprints, if a cache has been fetched — the generators saturate around
-# 6,300 layouts and the Chinchilla budget wants more than that. Absent, the run
+# 7,600 layouts and the Chinchilla budget wants more than that. Absent, the run
 # is synthetic-only and everything else about it is unchanged, which is what
 # keeps this script runnable on a box with no network.
 #

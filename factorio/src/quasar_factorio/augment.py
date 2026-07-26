@@ -149,23 +149,25 @@ def variants(
 
     A module spec brings its zone and its ports along. The zone turns with the
     design — a 16x20 zone rotated is 20x16 — and the ports are transformed by
-    `oriented`. That only holds while the design fills the zone it was given: if
-    it does not, the offset that normalisation removes is not recoverable from
-    the design alone, so the geometric forms are dropped and only the tierings
-    survive. The module generator draws to the edges precisely so that this
-    branch stays unused.
+    `oriented`, which moves them by exactly the offset it moved the design by.
+
+    A design smaller than its zone turns just as safely, which is worth stating
+    because it looks like it should not. Where the design sits inside its zone is
+    not written down anywhere: a port names a tile of the *design*, and the zone
+    check is `extent <= zone`, a comparison of sizes. So the slack has nowhere to
+    disagree with a rotation, and `test_a_rotated_module_still_delivers` holds it
+    to that over every draw with slack in it.
     """
     data = data or load()
     rng = rng or random.Random(0)
-    zoned = bool(spec.ports) and (spec.width, spec.height) != blueprint.extent(data)
 
-    pool = [(blueprint, spec.ports, 0, False)] if zoned else _forms(blueprint, spec.ports, data)
+    pool = _forms(blueprint, spec.ports, data)
     if (upgraded := retier(blueprint, data)) is not None:
-        pool += [(upgraded, spec.ports, 0, False)] if zoned else _forms(upgraded, spec.ports, data)
+        pool += _forms(upgraded, spec.ports, data)
 
     seen: set[tuple] = set()
     out: list[tuple[Blueprint, Spec]] = []
-    for candidate, ports, quarters, _ in _shuffled_keeping_first(pool, rng):
+    for candidate, ports, quarters in _shuffled_keeping_first(pool, rng):
         key = tuple(candidate.entities)
         if key in seen or not candidate.fits(data):
             continue
@@ -194,10 +196,14 @@ def variants(
 
 def _forms(
     blueprint: Blueprint, ports: tuple[Port, ...], data: Data
-) -> list[tuple[Blueprint, tuple[Port, ...], int, bool]]:
-    """`dihedral`, but saying which motion produced each form."""
+) -> list[tuple[Blueprint, tuple[Port, ...], int]]:
+    """`dihedral`, but carrying the ports and the quarter turn that produced it.
+
+    The quarter turn is what the caller needs to swap a zone's width and height;
+    whether the form was also mirrored does not change its size.
+    """
     return [
-        (*oriented(blueprint, ports, quarters, flip=flip, data=data), quarters, flip)
+        (*oriented(blueprint, ports, quarters, flip=flip, data=data), quarters)
         for flip in (False, True)
         for quarters in range(4)
     ]

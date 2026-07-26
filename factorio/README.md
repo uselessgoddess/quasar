@@ -16,17 +16,17 @@ blueprints, and CI builds a corpus without downloading a wheel.
 
 ## The model
 
-`quasar-factorio-nano` is 3.5M parameters, sized for this corpus rather than scaled down
+`quasar-factorio-nano` is 3.6M parameters, sized for this corpus rather than scaled down
 from `tiny`:
 
 ```
 $ cargo run --release -- budget factorio-nano
 embedding       0.1M      seq_len          512
 lm_head         0.0M      ssd chunk         32
-ssm             1.5M      fwd FLOPs/token  8.1M
+ssm             1.5M      fwd FLOPs/token  8.2M
 attention       0.2M      states muon      0.04 GiB
-ffn             1.8M      activations      120 MiB at micro_batch 1
-total           3.5M      micro_batch in 16 GiB, muon states 135
+ffn             1.8M      activations      121 MiB at micro_batch 1
+total           3.6M      micro_batch in 16 GiB, muon states 134
 ```
 
 Three numbers decide the shape. The vocabulary is **739 tokens** instead of
@@ -215,7 +215,7 @@ modules. The other 9,502 draws were forms of a layout already kept, and 13,996
 of the expanded documents came out byte-identical to one already written —
 drawing from eleven generators collides, and the manifest says by how much. The
 6,000 draws `examples/factorio.sh` defaults to give 4,304 layouts and 4.65M
-tokens, already more than a 3.5M-parameter model gets through in half an hour.
+tokens, already more than a 3.6M-parameter model gets through in half an hour.
 
 Building it is pure Python and runs before the GPU gets to do anything, so what
 it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and
@@ -257,10 +257,10 @@ that would have gone to a generator with 44 forms in it go to the two that are
 still saying something new.
 
 That is the number the training budget has to be read against. `factorio-nano`
-is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens — five
+is 3.6M parameters, so the Chinchilla rule asks for 71.4M training tokens — five
 epochs over what a 20,000-draw build contains. Data-constrained scaling laws put
 the point where repeating stops being nearly free at about four epochs, which
-means a Chinchilla-budget run needs ~17.6M *unique* tokens and the generators
+means a Chinchilla-budget run needs ~17.9M *unique* tokens and the generators
 still do not quite get there alone. More variety, not more draws.
 
 ### Human blueprints
@@ -314,9 +314,9 @@ and a book holds seventeen blueprints on average:
 14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
 mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. A
 20,000-draw synthetic build is 14.1M tokens against a Chinchilla budget of
-70.4M, so synthetic-only is five passes over everything it can say, where the
+71.4M, so synthetic-only is five passes over everything it can say, where the
 data-constrained scaling laws put the point at which repeating stops being
-nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.6M that
+nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.9M that
 four epochs of the budget need: the human half is not a garnish here, it is what
 puts the run under four epochs instead of over.
 

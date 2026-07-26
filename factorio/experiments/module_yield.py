@@ -1,10 +1,10 @@
 """What does the module generator add to the corpus, in the units that matter?
 
 The training budget question from issue #17 is not "is the model too small" but
-"is there anything left to learn". `factorio-nano` is 3.5M parameters, so the
-Chinchilla rule asks for 70.4M tokens, and data-constrained scaling puts the
+"is there anything left to learn". `factorio-nano` is 3.6M parameters, so the
+Chinchilla rule asks for 71.4M tokens, and data-constrained scaling puts the
 point where repeating stops being nearly free at about four epochs — so a run at
-budget needs ~17.6M *unique* tokens. The reported run had 9.17M and did 7.7
+budget needs ~17.9M *unique* tokens. The reported run had 9.17M and did 7.7
 epochs. Enlarging the model without moving that number moves the run further into
 the repetition regime, not further along the loss curve.
 

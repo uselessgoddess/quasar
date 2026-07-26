@@ -188,7 +188,7 @@ enum Preset {
     /// `tiny`, cut down to what trains fastest inside 16 GB.
     TinyTurbo,
     Base,
-    /// 3.5M, 739-token vocabulary — the Factorio blueprint family.
+    /// 3.6M, 739-token vocabulary — the Factorio blueprint family.
     FactorioNano,
     Toy,
 }
@@ -455,7 +455,7 @@ impl Preset {
     /// the default token budget is unchanged. Larger presets keep the
     /// memory-saving defaults; callers can still override every path.
     ///
-    /// `factorio-nano` is the other end: at 3.5M parameters the memory-saving
+    /// `factorio-nano` is the other end: at 3.6M parameters the memory-saving
     /// defaults buy nothing and cost a third of the throughput, so both come
     /// off and the batch goes into micro-batch where it runs as one pass.
     ///

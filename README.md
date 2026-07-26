@@ -10,7 +10,7 @@ nothing to slide over:
 
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
-| `factorio-nano` | 3.5M | 8.1M | 0.05 GiB | 0.12 GiB | 135 |
+| `factorio-nano` | 3.6M | 8.2M | 0.05 GiB | 0.12 GiB | 134 |
 | `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
 | `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |

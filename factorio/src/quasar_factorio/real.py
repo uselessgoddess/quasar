@@ -3,7 +3,7 @@
 The generators saturate. 35,200 draws through `synth.sample` produce 7,579
 distinct layouts, and six of the eleven generators are exhausted by a few
 hundred — a lab block has 56 forms and a mining outpost 44. That ceiling is
-about 12M tokens, and the Chinchilla budget for `factorio-nano` is 70.4M: six passes
+about 12M tokens, and the Chinchilla budget for `factorio-nano` is 71.4M: six passes
 over everything the generators can say, when data-constrained scaling laws put
 the point where repeating stops being nearly free at four. Blueprints people
 published are the only source of layouts nobody wrote a generator for.

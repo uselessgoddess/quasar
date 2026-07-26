@@ -3,7 +3,7 @@
 
 The generators in `synth.py` saturate: 35,200 draws produce 7,579 distinct
 designs, and six of the eleven generators are exhausted by a few hundred. That
-is about 12M tokens against a Chinchilla budget of 70.4M — six passes over
+is about 12M tokens against a Chinchilla budget of 71.4M — six passes over
 everything they can say, which is where a small model stops learning Factorio
 and starts learning the templates. Real blueprints are the only source of
 layouts nobody wrote a generator for.

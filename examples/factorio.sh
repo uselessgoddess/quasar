@@ -29,7 +29,7 @@ steps=${STEPS:-}
 prompts=${PROMPTS:-24}
 backend=${BACKEND:-}
 # Human blueprints, if a cache has been fetched — 20,000 weighted draws are
-# 14.1M tokens and the Chinchilla budget wants 70.4M. Absent, the run
+# 14.1M tokens and the Chinchilla budget wants 71.4M. Absent, the run
 # is synthetic-only and everything else about it is unchanged, which is what
 # keeps this script runnable on a box with no network.
 #

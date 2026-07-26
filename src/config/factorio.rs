@@ -42,7 +42,7 @@ pub const SEQ_LEN: usize = 512;
 /// A member of the family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
-    /// 3.5M — the blueprint model the harness trains.
+    /// 3.6M — the blueprint model the harness trains.
     Nano,
 }
 
@@ -63,7 +63,7 @@ impl Size {
     }
 }
 
-/// `quasar-factorio-nano`, 3.5M — the blueprint model.
+/// `quasar-factorio-nano`, 3.6M — the blueprint model.
 ///
 /// Sized for its corpus rather than scaled down from `tiny`. The vocabulary is
 /// 739 tokens instead of 32,768, so the embedding costs almost nothing and the

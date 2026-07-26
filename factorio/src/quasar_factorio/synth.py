@@ -26,8 +26,10 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from . import plan as planner
+from .augment import oriented
 from .blueprint import Blueprint, Placement, rotate
-from .grammar import Spec
+from .grammar import Port, Spec
 from .prototypes import EAST, NORTH, SOUTH, WEST, Data, load
 
 # Belt, inserter and furnace tiers, cheapest first. Sampling a tier per
@@ -672,6 +674,133 @@ def bus_tap(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     return _oriented(blueprint, rng, data, "bus-tap", None)
 
 
+#: Entities one module may contain. A document is roughly six tokens an entity
+#: and the context is 512, so this is the ceiling that keeps a module — spec,
+#: ports, plan and all — inside one window rather than truncated at the end,
+#: which would teach the model that blueprints sometimes just stop.
+MODULE_ENTITIES = 70
+
+
+@functools.cache
+def _module_targets(data: Data) -> tuple[planner.Module, ...]:
+    """Every product a stacked-band module can make, with what it is handed."""
+    return planner.modules(data)
+
+
+def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
+    """A closed module: inputs on the edge, a recipe chain inside, one output.
+
+    This is the layout the whole planner exists for, and it is one idea repeated
+    once per stage of the chain. A stage is a belt, a row of inserters facing
+    down into a row of machines, and a row of inserters facing down out of them —
+    so the belt *below* one stage is the belt *above* the next, and the product
+    of the machines above lands on exactly the belt the machines below draw from.
+    A two-stage chain stacks two of those and the intermediate never touches the
+    module boundary at all.
+
+    Raw ingredients enter on the left of whichever stage needs them, which is why
+    `plan.modules` rejects a chain whose stage wants more raws than a belt has
+    lanes. The finished product leaves at the far end of the bottom belt, and
+    that tile is the only place anything crosses the edge: every other belt row
+    stops one column short and ends against a pole, so nothing spills into
+    whatever the player puts next to this.
+    """
+    target = rng.choice(_module_targets(data))
+    product, supply = target.product, target.supply
+    unit = planner.solve(data, product, supply, rate=1e-9, depth=target.depth)
+    stages = _budgeted(data, target, unit, rng)
+
+    tier = _tier(rng)
+    belt = BELTS[tier]
+    inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
+    canvas = Canvas.new(data)
+    width = max(stage.count * data.entities[stage.machine].width for stage in stages)
+
+    ports: list[Port] = []
+    row = 0
+    for stage in stages:
+        proto = data.entities[stage.machine]
+        # One column short of the edge: the belt is internal plumbing, and a
+        # belt that reached the boundary would be an undeclared port.
+        canvas.line(belt, 0, row, width - 1, EAST)
+        canvas.maybe("medium-electric-pole", width - 1, row)
+        for index in range(stage.count):
+            x = index * proto.width
+            canvas.place(inserter, x, row + 1, SOUTH)
+            canvas.place(stage.machine, x, row + 2, recipe=stage.recipe)
+            canvas.place(inserter, x, row + 2 + proto.height, SOUTH)
+        for x in range(1, width, 6):
+            canvas.maybe("medium-electric-pole", x, row + 1)
+        for item in dict.fromkeys(stage.ingredients):
+            if item in supply:
+                ports.append(Port("in", item, 0, row, "w"))
+        row += 3 + proto.height
+
+    canvas.line(belt, 0, row, width, EAST)
+    ports.append(Port("out", product, width - 1, row, "e"))
+
+    blueprint = canvas.build(f"{product} module")
+    steps = tuple(stage.step() for stage in stages)
+    # A zone the player marked out is not always the zone a design fills, so
+    # some of the corpus is drawn a little smaller than it was asked for. The
+    # spec then states the request and the grader checks the design fits inside
+    # it, which is the relation that holds at inference time.
+    slack = rng.choices((0, 1, 2), weights=(6, 2, 1))[0]
+    return _module_spec(blueprint, ports, steps, product, slack, rng, data)
+
+
+def _budgeted(data: Data, target: planner.Module, unit, rng: random.Random):
+    """The largest plan whose layout still fits `MODULE_ENTITIES`.
+
+    Searched downwards from a random ambition rather than solved: the entity
+    count is a step function of the machine count, because a wider stage extends
+    every belt row in the design and not only its own.
+    """
+    for machines in range(rng.randint(unit.machines, unit.machines * 3), unit.machines - 1, -1):
+        try:
+            candidate = planner.fit(
+                data, target.product, target.supply, machines=machines, depth=target.depth
+            )
+        except planner.PlanError:
+            continue
+        if _entities(data, candidate.stages) <= MODULE_ENTITIES:
+            return candidate.stages
+    return unit.stages
+
+
+def _entities(data: Data, stages) -> int:
+    """What `module` will place, without placing it."""
+    width = max(stage.count * data.entities[stage.machine].width for stage in stages)
+    total = width  # the output belt
+    for stage in stages:
+        # belt, end pole, three entities a machine, a pole every six columns
+        total += (width - 1) + 1 + 3 * stage.count + len(range(1, width, 6))
+    return total
+
+
+def _module_spec(
+    blueprint: Blueprint,
+    ports: list[Port],
+    steps: tuple,
+    product: str,
+    slack: int,
+    rng: random.Random,
+    data: Data,
+) -> tuple[Blueprint, Spec]:
+    """Rotate the module and its ports together, then state the zone."""
+    turned, moved = oriented(blueprint, tuple(ports), rng.randrange(4), data=data)
+    width, height = turned.extent(data)
+    return turned, Spec.measure(
+        turned,
+        "module",
+        product,
+        data,
+        ports=moved,
+        plan=steps,
+        zone=(width + slack, height + slack),
+    )
+
+
 def _oriented(
     blueprint: Blueprint,
     rng: random.Random,
@@ -691,6 +820,7 @@ def _oriented(
 
 
 GENERATORS: dict[str, Generator] = {
+    "module": module,
     "belt-lane": belt_lane,
     "smelter-column": smelter_column,
     "assembler-row": assembler_row,
@@ -707,7 +837,14 @@ GENERATORS: dict[str, Generator] = {
 # player would call "a factory" — smelters, assembler rows, malls — are worth
 # more of the corpus than belt lanes, which the model masters in a few hundred
 # steps and then keeps being taught.
+#
+# `module` is the heaviest by a wide margin because it is the only task in the
+# mixture that is not already solved. The measured run put every other metric
+# above 0.97 and then had nothing left to learn from those templates; a quarter
+# of the corpus being the unsolved task is what makes the next run's loss curve
+# mean something.
 WEIGHTS = {
+    "module": 26,
     "belt-lane": 6,
     "smelter-column": 14,
     "assembler-row": 16,

@@ -241,12 +241,23 @@ def to_string(blueprint: Blueprint, data: Data | None = None, *, label: str = ""
     return encode_string(to_json(blueprint, data, label=label))
 
 
-def rotate(blueprint: Blueprint, quarters: int, data: Data | None = None) -> Blueprint:
+def rotate(
+    blueprint: Blueprint,
+    quarters: int,
+    data: Data | None = None,
+    *,
+    normalise: bool = True,
+) -> Blueprint:
     """Rotate by `quarters` * 90 degrees clockwise about the origin.
 
     Rotation is the cheapest honest augmentation there is: a smelter column is
     still a smelter column sideways, and it quadruples the corpus without
     teaching the model a single thing that is false.
+
+    `normalise=False` leaves the result where the arithmetic put it, negative
+    coordinates and all. Anything travelling alongside the design — a module's
+    ports, say — has to be shifted by the *same* offset, and that is only
+    possible if the shift has not already happened.
     """
     data = data or load()
     quarters %= 4
@@ -258,7 +269,8 @@ def rotate(blueprint: Blueprint, quarters: int, data: Data | None = None) -> Blu
             x, y, width, height = -(y + height), x, height, width
         direction = (placement.direction + 2 * quarters) % 8
         out.append(replace(placement, x=x, y=y, direction=direction))
-    return Blueprint(entities=out, label=blueprint.label, source=blueprint.source).normalised(data)
+    turned = Blueprint(entities=out, label=blueprint.label, source=blueprint.source)
+    return turned.normalised(data) if normalise else turned
 
 
 # Mirroring maps a direction to its reflection. Belts and inserters keep working
@@ -266,7 +278,7 @@ def rotate(blueprint: Blueprint, quarters: int, data: Data | None = None) -> Blu
 _FLIP_X = {NORTH: NORTH, EAST: WEST, SOUTH: SOUTH, WEST: EAST, 1: 7, 3: 5, 5: 3, 7: 1}
 
 
-def mirror(blueprint: Blueprint, data: Data | None = None) -> Blueprint:
+def mirror(blueprint: Blueprint, data: Data | None = None, *, normalise: bool = True) -> Blueprint:
     """Reflect left-to-right.
 
     Splitters and underground belts survive this; anything asymmetric in a way
@@ -279,4 +291,5 @@ def mirror(blueprint: Blueprint, data: Data | None = None) -> Blueprint:
         direction = _FLIP_X.get(placement.direction, placement.direction)
         width, _ = placement.size(data)
         out.append(replace(placement, x=-(placement.x + width), direction=direction))
-    return Blueprint(entities=out, label=blueprint.label, source=blueprint.source).normalised(data)
+    flipped = Blueprint(entities=out, label=blueprint.label, source=blueprint.source)
+    return flipped.normalised(data) if normalise else flipped

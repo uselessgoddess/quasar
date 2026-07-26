@@ -188,7 +188,7 @@ enum Preset {
     /// `tiny`, cut down to what trains fastest inside 16 GB.
     TinyTurbo,
     Base,
-    /// 3.5M, 495-token vocabulary — the Factorio blueprint family.
+    /// 3.5M, 657-token vocabulary — the Factorio blueprint family.
     FactorioNano,
     Toy,
 }

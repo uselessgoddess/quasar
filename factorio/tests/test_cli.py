@@ -73,7 +73,7 @@ def test_the_manifest_agrees_with_what_was_asked_for(corpus):
     # Every generator is held to a perfect score by its own tests, so a single
     # rejection here is a bug rather than an acceptable loss.
     assert manifest["rejected"] == 0
-    assert manifest["vocab_size"] == 495
+    assert manifest["vocab_size"] == 657
 
 
 def test_the_held_out_prompts_carry_what_a_grader_needs(corpus):

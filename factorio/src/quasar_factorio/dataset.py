@@ -201,7 +201,7 @@ def _write_prompts(path: pathlib.Path, held: list[Design], data: Data, limit: in
             json.dumps(
                 {
                     "kind": design.kind,
-                    "spec": asdict(design.spec),
+                    "spec": design.spec.to_dict(),
                     "prompt": grammar.prompt(design.spec),
                     "reference": design.documents[0] if design.documents else "",
                 },

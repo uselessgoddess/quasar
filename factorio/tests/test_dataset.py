@@ -102,7 +102,10 @@ def test_prompts_are_held_out_and_replayable(corpus):
     trained = {encoder.decode(ids) for ids in shards.documents(tokens, meta.eos)}
     for entry in prompts:
         assert entry["reference"] not in trained
-        assert entry["prompt"] == grammar.prompt(grammar.Spec(**entry["spec"]))
+        # Through the JSON and back: a spec whose ports survive as plain dicts
+        # would produce a prompt with no ports in it, which is a different task
+        # than the one the reference answers.
+        assert entry["prompt"] == grammar.prompt(grammar.Spec.from_dict(entry["spec"]))
         assert entry["reference"].startswith(entry["prompt"])
 
 

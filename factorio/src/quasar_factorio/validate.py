@@ -16,12 +16,21 @@ the one plotted as the headline.
 sides, belts that lead somewhere. A blueprint can be perfectly valid and
 completely useless, and without these three the validity curve would happily
 report success for a field of disconnected furnaces.
+
+*Flow* is the third tier and the newest, delegated to `flow.trace`. The first
+two tiers are local — each asks a question about one entity and its neighbours —
+and the measured run saturated all of them at once, which is what a benchmark
+does when it has stopped measuring the model rather than when the model has
+finished learning. Whether an item can travel from an input to an output is not
+a question any single tile can answer, and it is the question a module exists to
+get right.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from . import flow as itemflow
 from .blueprint import GRID, Blueprint
 from .grammar import COUNT_MAX, ParseError, Spec, parse
 from .prototypes import EAST, NORTH, SOUTH, WEST, Data, load
@@ -92,6 +101,31 @@ class Report:
     error_at: int = -1
     spec_kind: str = ""
     spec_honoured: bool = False
+    #: Whether the spec declared output ports, i.e. whether `delivers` means
+    #: anything. A belt lane has nothing to deliver and should not be averaged
+    #: in as a failure to deliver it.
+    ported: bool = False
+    delivers: float = 0.0
+    fed: float = 0.0
+    working: float = 0.0
+    #: Crafting machines in the design; see `flow.Flow.machines`. The same
+    #: caveat `ported` carries for `delivers`, carried for `fed` and `working`.
+    machines: int = 0
+    mixed: int = 0
+    leaks: int = 0
+    within_zone: bool = True
+    missing: tuple[str, ...] = ()
+
+    def asks_about_flow(self) -> bool:
+        """Whether `flows()` is a fact about this design or an artefact.
+
+        A balancer has no ports and no machines: nothing was supposed to arrive
+        anywhere, so there is no sense in which it failed to. It is a legality
+        question, it scores 1.000 on the legality tier, and averaging a flow of
+        zero in for it would make the flow number report the composition of the
+        benchmark rather than the state of the model.
+        """
+        return self.valid and (self.ported or bool(self.machines))
 
     def quality(self) -> float:
         """One number for a scatter plot, not for a leaderboard.
@@ -99,13 +133,35 @@ class Report:
         Zero for anything invalid, otherwise the mean of the three quality
         fractions. Deliberately blunt: its job is to separate "a field of
         disconnected furnaces" from "a smelter".
+
+        Flow is deliberately *not* folded in. The two are measuring different
+        failures — decoration versus a broken chain — and a single average would
+        let one hide the other, which is how the run being analysed ended up
+        with a headline number that had nothing left to say.
         """
         if not self.valid:
             return 0.0
         return (self.powered + self.connected_inserters + self.belts_lead_somewhere) / 3
 
+    def flows(self) -> float:
+        """The item-flow score: does the thing work, as opposed to parse?
+
+        Zero for anything invalid, for the same reason `quality` is: an
+        overlapping design cannot be pasted, so what would have flowed through
+        it is not a fact about anything.
+
+        Also zero for a design with neither ports nor machines, which is a
+        different kind of nothing — `asks_about_flow` is the one to ask before
+        averaging this, and `summarise` does.
+        """
+        if not self.valid:
+            return 0.0
+        return 0.7 * self.delivers + 0.3 * self.fed if self.ported else self.fed
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        out = asdict(self)
+        out["missing"] = list(self.missing)
+        return out
 
 
 @dataclass
@@ -123,6 +179,20 @@ class Summary:
     overlap_rate: float = 0.0
     empty_rate: float = 0.0
     spec_rate: float = 0.0
+    #: `mean_delivers` is averaged over the samples that declared output ports;
+    #: `mean_fed` and `mean_working` over the ones with a machine to feed;
+    #: `mean_flow` over either. The three counts are here so a low number can be
+    #: read as "few were asked" rather than mistaken for "few succeeded".
+    ported: int = 0
+    crafting: int = 0
+    flowing: int = 0
+    mean_delivers: float = 0.0
+    mean_fed: float = 0.0
+    mean_working: float = 0.0
+    mean_flow: float = 0.0
+    leak_rate: float = 0.0
+    mixed_rate: float = 0.0
+    zone_rate: float = 0.0
     errors: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -307,6 +377,20 @@ def inspect(blueprint: Blueprint, data: Data | None = None, spec: Spec | None = 
     report.valid = bool(
         report.entities and report.fits and report.overlaps == 0 and report.illegal_recipes == 0
     )
+    if report.valid:
+        # Only for a design the game would accept. Propagating items through a
+        # pile of overlapping entities is neither meaningful nor cheap, and the
+        # answer is discarded by `flows()` anyway.
+        traced = itemflow.trace(blueprint, spec, data)
+        report.ported = bool(spec is not None and spec.outputs())
+        report.delivers = traced.delivers
+        report.fed = traced.fed
+        report.working = traced.working
+        report.machines = traced.machines
+        report.mixed = traced.mixed
+        report.leaks = traced.leaks
+        report.within_zone = traced.within_zone
+        report.missing = traced.missing
     if spec is not None:
         # A tolerance of two machines and four tiles. Asking a 3M model to hit an
         # exact entity count is asking it to count, which is not what it is for.
@@ -364,6 +448,16 @@ def summarise(reports: list[Report]) -> Summary:
         return sum(values) / len(values) if values else 0.0
 
     specced = [report for report in reports if report.spec_kind]
+    # Flow is only defined for designs that were built; averaging a zero in for
+    # every unparseable generation would make the metric track validity instead
+    # of flow, and the two are supposed to be able to disagree.
+    built = [report for report in reports if report.valid]
+    ported = [report for report in built if report.ported]
+    # And only for designs the question applies to. A belt lane has no machine
+    # to feed, so the zero `fed` it reports is "nothing was asked" — averaging
+    # those in makes the number track how much of the benchmark is machinery.
+    crafting = [report for report in built if report.machines]
+    flowing = [report for report in reports if report.asks_about_flow()]
     return Summary(
         samples=total,
         parse_rate=len(ok) / total,
@@ -376,5 +470,15 @@ def summarise(reports: list[Report]) -> Summary:
         overlap_rate=mean(bool(report.overlaps) for report in ok),
         empty_rate=mean(report.entities == 0 for report in reports),
         spec_rate=mean(report.spec_honoured for report in specced) if specced else 0.0,
+        ported=len(ported),
+        crafting=len(crafting),
+        flowing=len(flowing),
+        mean_delivers=mean(report.delivers for report in ported),
+        mean_fed=mean(report.fed for report in crafting),
+        mean_working=mean(report.working for report in crafting),
+        mean_flow=mean(report.flows() for report in flowing),
+        leak_rate=mean(bool(report.leaks) for report in built),
+        mixed_rate=mean(bool(report.mixed) for report in built),
+        zone_rate=mean(report.within_zone for report in ported),
         errors=dict(sorted(errors.items(), key=lambda item: -item[1])),
     )

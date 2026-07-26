@@ -3,7 +3,7 @@
 //! Kept apart from the language presets because almost nothing they share is a
 //! coincidence worth generalising. `tiny` and `base` are sized by a scaling law
 //! measured over a 32,768-token BPE vocabulary and a 2,048-token context;
-//! these are sized by a corpus whose vocabulary is 495 fixed grammar tokens and
+//! these are sized by a corpus whose vocabulary is 739 fixed grammar tokens and
 //! whose longest sentence is one 64-entity blueprint. Their knobs move for
 //! different reasons and are checked against different things — the tests below
 //! compare a member of this family against the corpus `quasar_factorio` writes,
@@ -18,22 +18,31 @@ use super::Model;
 /// Tokens in the blueprint grammar.
 ///
 /// Fixed, not learned: `quasar_factorio.tokenizer` derives the vocabulary from
-/// the prototype table, so it changes only when Factorio's own entity list
-/// does. `factorio/tests/test_tokenizer.py` pins the same number from the other
-/// side, and `quasar train` reads the corpus's real vocabulary anyway — this is
-/// what the budget arithmetic assumes, not what the run trusts.
-pub const VOCAB: usize = 495;
+/// the prototype table, so it changes only when Factorio's own entity list does
+/// or when the grammar grows a section. It grew from 495 when modules arrived:
+/// an item alphabet for ports (`i:iron-plate`, distinct from the `r:` recipe
+/// alphabet), four side tokens, and the `<in> <out> <plan>` markers; distilling
+/// every craftable item class rather than `data.raw.item` alone then brought
+/// science packs and the other missing vanilla items into that alphabet.
+/// `factorio/tests/test_cli.py` pins the same number from the other side,
+/// and `quasar train` reads the corpus's real vocabulary anyway — this is what
+/// the budget arithmetic assumes, not what the run trusts.
+pub const VOCAB: usize = 739;
 
 /// The context one blueprint needs.
 ///
 /// A 64-entity design serialises to about 460 tokens, so 512 holds a whole
 /// document with its prompt and there is nothing past it worth attending to.
+/// A module spends more of that on its prompt — ports and a plan, five and
+/// three tokens a line — and `synth.MODULE_ENTITIES` is set so the total stays
+/// inside the window rather than truncating, which would teach the model that
+/// a blueprint sometimes just stops.
 pub const SEQ_LEN: usize = 512;
 
 /// A member of the family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
-    /// 3.5M — the blueprint model the harness trains.
+    /// 3.6M — the blueprint model the harness trains.
     Nano,
 }
 
@@ -54,10 +63,10 @@ impl Size {
     }
 }
 
-/// `quasar-factorio-nano`, 3.5M — the blueprint model.
+/// `quasar-factorio-nano`, 3.6M — the blueprint model.
 ///
 /// Sized for its corpus rather than scaled down from `tiny`. The vocabulary is
-/// 495 tokens instead of 32,768, so the embedding costs almost nothing and the
+/// 739 tokens instead of 32,768, so the embedding costs almost nothing and the
 /// whole budget goes into the stack.
 ///
 /// Attention is unwindowed here, which is the one place this disagrees with
@@ -107,6 +116,10 @@ mod tests {
     fn nano_matches_the_blueprint_corpus() {
         let cfg = nano();
 
+        // Pinned independently by `factorio/tests/test_cli.py`: if the Python
+        // grammar grows, the budget preset must grow with the tokenizer that
+        // `train` reads from the shards.
+        assert_eq!(VOCAB, 739);
         assert_eq!(cfg.vocab_size, VOCAB);
         assert!(cfg.seq_len >= SEQ_LEN);
         // Every entity already placed constrains the next one, so attention has

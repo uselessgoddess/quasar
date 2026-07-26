@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from dataclasses import replace
 
 from .blueprint import Blueprint, mirror, rotate
-from .grammar import Spec
+from .grammar import Port, Spec
 from .prototypes import Data, load
 
 # Same footprint, same or wider capability, same or longer reach. Checked
@@ -68,7 +67,7 @@ def canonical(blueprint: Blueprint, data: Data | None = None) -> str:
     data = data or load()
     base = Blueprint(
         entities=[
-            replace(placement, name=BASELINE.get(placement.name, placement.name))
+            placement.renamed(BASELINE.get(placement.name, placement.name))
             for placement in blueprint.entities
         ]
     )
@@ -88,10 +87,38 @@ def retier(blueprint: Blueprint, data: Data | None = None) -> Blueprint | None:
         label=blueprint.label,
         source=blueprint.source,
         entities=[
-            replace(placement, name=UPGRADES.get(placement.name, placement.name))
+            placement.renamed(UPGRADES.get(placement.name, placement.name))
             for placement in blueprint.entities
         ],
     ).normalised(data)
+
+
+def oriented(
+    blueprint: Blueprint,
+    ports: tuple[Port, ...] = (),
+    quarters: int = 0,
+    *,
+    flip: bool = False,
+    data: Data | None = None,
+) -> tuple[Blueprint, tuple[Port, ...]]:
+    """One rigid motion, applied to a design and to its ports together.
+
+    Ports are the one thing in this file that is not part of the blueprint and
+    still has to move with it. Doing it here rather than in `blueprint.rotate`
+    keeps the geometry in one place: the transforms run un-normalised, the
+    offset that brings the result back to the origin is read off the bounds
+    once, and the same offset is applied to both. A port shifted by anything
+    else would point at a tile the design no longer occupies, which is a
+    mislabelled example rather than a crash.
+    """
+    data = data or load()
+    moved = mirror(blueprint, data, normalise=False) if flip else blueprint
+    turned = rotate(moved, quarters, data, normalise=False)
+    if flip:
+        ports = tuple(port.mirrored() for port in ports)
+    ports = tuple(port.rotated(quarters) for port in ports)
+    left, top, _, _ = turned.bounds(data)
+    return turned.normalised(data), tuple(port.moved(-left, -top) for port in ports)
 
 
 def dihedral(blueprint: Blueprint, data: Data | None = None) -> Iterator[Blueprint]:
@@ -101,9 +128,9 @@ def dihedral(blueprint: Blueprint, data: Data | None = None) -> Iterator[Bluepri
     itself, and the corpus builder deduplicates on the serialised text anyway.
     """
     data = data or load()
-    for reflected in (blueprint, mirror(blueprint, data)):
+    for flip in (False, True):
         for quarters in range(4):
-            yield rotate(reflected, quarters, data)
+            yield oriented(blueprint, quarters=quarters, flip=flip, data=data)[0]
 
 
 def variants(
@@ -119,27 +146,70 @@ def variants(
     Re-measuring rather than copying the spec is the whole point: rotating a
     3x9 smelter column makes it 9x3, and a spec that still claimed 3x9 would
     teach the model that the dimensions in the prompt are decorative.
+
+    A module spec brings its zone and its ports along. The zone turns with the
+    design — a 16x20 zone rotated is 20x16 — and the ports are transformed by
+    `oriented`, which moves them by exactly the offset it moved the design by.
+
+    A design smaller than its zone turns just as safely, which is worth stating
+    because it looks like it should not. Where the design sits inside its zone is
+    not written down anywhere: a port names a tile of the *design*, and the zone
+    check is `extent <= zone`, a comparison of sizes. So the slack has nowhere to
+    disagree with a rotation, and `test_a_rotated_module_still_delivers` holds it
+    to that over every draw with slack in it.
     """
     data = data or load()
     rng = rng or random.Random(0)
-    pool = list(dihedral(blueprint, data))
+
+    pool = _forms(blueprint, spec.ports, data)
     if (upgraded := retier(blueprint, data)) is not None:
-        pool += list(dihedral(upgraded, data))
+        pool += _forms(upgraded, spec.ports, data)
 
     seen: set[tuple] = set()
     out: list[tuple[Blueprint, Spec]] = []
-    for candidate in _shuffled_keeping_first(pool, rng):
+    for candidate, ports, quarters in _shuffled_keeping_first(pool, rng):
         key = tuple(candidate.entities)
         if key in seen or not candidate.fits(data):
             continue
         seen.add(key)
-        out.append((candidate, Spec.measure(candidate, spec.kind, spec.product, data)))
+        zone = None
+        if spec.ports:
+            zone = (spec.height, spec.width) if quarters % 2 else (spec.width, spec.height)
+        out.append(
+            (
+                candidate,
+                Spec.measure(
+                    candidate,
+                    spec.kind,
+                    spec.product,
+                    data,
+                    ports=ports,
+                    plan=spec.plan,
+                    zone=zone,
+                ),
+            )
+        )
         if len(out) >= limit:
             break
     return out
 
 
-def _shuffled_keeping_first(pool: list[Blueprint], rng: random.Random) -> list[Blueprint]:
+def _forms(
+    blueprint: Blueprint, ports: tuple[Port, ...], data: Data
+) -> list[tuple[Blueprint, tuple[Port, ...], int]]:
+    """`dihedral`, but carrying the ports and the quarter turn that produced it.
+
+    The quarter turn is what the caller needs to swap a zone's width and height;
+    whether the form was also mirrored does not change its size.
+    """
+    return [
+        (*oriented(blueprint, ports, quarters, flip=flip, data=data), quarters)
+        for flip in (False, True)
+        for quarters in range(4)
+    ]
+
+
+def _shuffled_keeping_first(pool: list, rng: random.Random) -> list:
     """Shuffle, but keep the original orientation first.
 
     A corpus that always contains the design as drawn, plus a random sample of

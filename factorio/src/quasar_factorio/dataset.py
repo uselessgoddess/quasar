@@ -31,6 +31,7 @@ import pathlib
 import random
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
+from itertools import zip_longest
 
 from . import augment, grammar, shards, synth, tokenizer, validate
 from .blueprint import Blueprint
@@ -82,17 +83,20 @@ def designs(
     seed: int = 0,
     data: Data | None = None,
     variants: int = 4,
+    weights: dict[str, float] | None = None,
 ) -> Iterator[Design]:
     """`count` drawn designs, each expanded into up to `variants` documents.
 
     The per-design RNG is seeded from the design index rather than shared, so a
     corpus of 10,000 designs contains the first 1,000 of a corpus of 1,000 —
     which makes a small run an honest preview of a large one.
+
+    `weights` overrides `synth.WEIGHTS`; see `synth.mixture`.
     """
     data = data or load()
     for index in range(count):
         rng = random.Random(seed * 1_000_003 + index)
-        blueprint, spec = synth.sample(rng, data)
+        blueprint, spec = synth.sample(rng, data, weights)
         design = Design(kind=spec.kind, blueprint=blueprint, spec=spec)
         for form, form_spec in augment.variants(blueprint, spec, data, rng=rng, limit=variants):
             design.documents.append(grammar.serialise(form, data, form_spec))
@@ -109,6 +113,7 @@ def build(
     extra: Iterator[Design] | None = None,
     valid_every: int = VALID_EVERY,
     prompts: int = 256,
+    weights: dict[str, float] | None = None,
 ) -> Stats:
     """Write `out/train`, `out/valid`, `out/tokenizer.json` and `out/manifest.json`.
 
@@ -133,7 +138,7 @@ def build(
     seen: set[bytes] = set()
     held: list[Design] = []
 
-    stream = designs(count, seed=seed, data=data, variants=variants)
+    stream = designs(count, seed=seed, data=data, variants=variants, weights=weights)
     for design in _chain(stream, extra):
         # Two draws that differ only by a turn, a flip or a belt tier are one
         # design; splitting them apart would put one in each split. See
@@ -194,14 +199,29 @@ def _write_prompts(path: pathlib.Path, held: list[Design], data: Data, limit: in
     prompt asks the model to build something new, not to recall something it
     has already written down. The reference document rides along so the
     renderer can put the two side by side.
+
+    Round-robin over kinds rather than in stream order. Callers take a prefix —
+    `examples/factorio.sh` samples the first two dozen, because generation is
+    the expensive half of the run — and in stream order a prefix is a sample of
+    the *mixture*, which is nine parts belt lane and assembler row. The metric
+    that still has somewhere to go is item flow, and item flow is a question
+    only the module prompts ask, so a prefix that mirrors the mixture spends its
+    budget on the part of the benchmark that already reads 1.000.
     """
+    by_kind: dict[str, list[Design]] = {}
+    for design in held:
+        by_kind.setdefault(design.kind, []).append(design)
+    ordered = []
+    for row in zip_longest(*by_kind.values()):
+        ordered.extend(design for design in row if design is not None)
+
     lines = []
-    for design in held[:limit]:
+    for design in ordered[:limit]:
         lines.append(
             json.dumps(
                 {
                     "kind": design.kind,
-                    "spec": asdict(design.spec),
+                    "spec": design.spec.to_dict(),
                     "prompt": grammar.prompt(design.spec),
                     "reference": design.documents[0] if design.documents else "",
                 },

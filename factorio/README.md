@@ -16,20 +16,20 @@ blueprints, and CI builds a corpus without downloading a wheel.
 
 ## The model
 
-`quasar-factorio-nano` is 3.5M parameters, sized for this corpus rather than scaled down
+`quasar-factorio-nano` is 3.6M parameters, sized for this corpus rather than scaled down
 from `tiny`:
 
 ```
 $ cargo run --release -- budget factorio-nano
 embedding       0.1M      seq_len          512
 lm_head         0.0M      ssd chunk         32
-ssm             1.5M      fwd FLOPs/token  8.1M
+ssm             1.5M      fwd FLOPs/token  8.2M
 attention       0.2M      states muon      0.04 GiB
-ffn             1.8M      activations      120 MiB at micro_batch 1
-total           3.5M      micro_batch in 16 GiB, muon states 135
+ffn             1.8M      activations      121 MiB at micro_batch 1
+total           3.6M      micro_batch in 16 GiB, muon states 134
 ```
 
-Three numbers decide the shape. The vocabulary is **495 tokens** instead of
+Three numbers decide the shape. The vocabulary is **739 tokens** instead of
 32,768, so the embedding costs almost nothing and the whole budget goes into the
 stack. The longest document in the corpus is **460 tokens**, so `seq_len 512`
 holds a whole blueprint and there is nothing past it worth attending to. And
@@ -62,11 +62,42 @@ belts can carry `t:input` or `t:output`. Cutting the line after `</spec>` gives
 a prompt: the model is asked to build something to a specification it has never
 been trained on.
 
+The spec has two optional sections, used by the module task and absent from
+everything the older generators write — a zone with declared inputs and outputs,
+and the recipe chain that fills it:
+
+```
+<bp> <spec> k:module r:electronic-circuit #5 #16 #20
+     <in> i:copper-plate s:n x03 y00
+     <in> i:iron-plate s:n x00 y06
+     <out> i:electronic-circuit s:e x15 y12
+     <plan> assembling-machine-1 r:copper-cable #2
+            assembling-machine-1 r:electronic-circuit #3 </plan>
+     </spec> <e> ... </bp>
+```
+
+A port is the tile it feeds *inside* the design plus the edge it sits on, rather
+than an offset along that edge: the tile rotates exactly like an entity, so
+augmentation cannot desynchronise it from the design, and the model already
+knows what `x03 y00` means where an offset would be a third numbering scheme
+with the same shape as the other two. Being on the edge is what makes a module
+composable — two modules whose ports agree butt together and the belts line up,
+which a design with its inputs somewhere in the middle cannot promise.
+
 Every name in the vocabulary is a real prototype. `assets/prototypes.json` is
-60 entities, 153 items and 212 recipes distilled from Factorio's own `data.raw`
-by `tools/distill_data_raw.py`, which records the source URL, the game version
-and the sha256 of the bytes it read — so entity sizes, recipe ingredients and
-crafting times are traceable to the game rather than to somebody's memory of it.
+60 entities, 235 items, 9 fluids and 212 recipes distilled from Factorio's own
+`data.raw` by `tools/distill_data_raw.py`, which records the source URL, the
+game version and the sha256 of the bytes it read — so entity sizes, recipe
+ingredients and crafting times are traceable to the game rather than to
+somebody's memory of it.
+
+The item table is swept out of every prototype category rather than out of
+`data.raw.item`, because Factorio files a science pack under `tool`, a piercing
+round under `ammo` and a speed module under `module`. Reading only `item` missed
+61 of the 214 things vanilla recipes name, and since the harness reads "has a
+stack size" as "a belt can carry it", the missing rows did not read as missing
+data — they read as `automation-science-pack` being a fluid, which deleted the
+whole science branch from the planner's catalogue.
 
 ## Pipeline
 
@@ -109,6 +140,10 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
     --sheet runs/nano/sheet.png --json runs/nano/grade.json
+
+# the same, over one generator's generations only -- `== GRADE MODULES ==`
+python -m quasar_factorio.cli grade runs/nano/samples.jsonl --kind module
+
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
     --grade runs/nano/samples-*.jsonl
 
@@ -127,11 +162,33 @@ the ones before it.
 
 ## What the corpus is
 
-Ten generators — smelter columns, assembler rows, mall cells, bus taps,
-balancers, mining outposts, solar and oil blocks, lab blocks, belt lanes — draw
-layouts with real entity footprints, real recipes and real ingredient ratios.
-Each layout is then augmented into its symmetries (four rotations, two
-reflections, belt tiers), which is where most of the documents come from.
+Eleven generators — smelter columns, assembler rows, mall cells, bus taps,
+balancers, mining outposts, solar and oil blocks, lab blocks, belt lanes and
+modules — draw layouts with real entity footprints, real recipes and real
+ingredient ratios. Each layout is then augmented into its symmetries (four
+rotations, two reflections, belt tiers), which is where most of the documents
+come from.
+
+The eleventh is the one the rest of this harness is now aimed at, and it is not
+drawn the way the others are. `plan.solve` expands "electronic circuits, given
+iron and copper plate" into a chain of recipes and whole numbers of machines by
+reading `assets/prototypes.json` — the same ingredient lists, craft times and
+machine speeds the game uses — and `synth.module` places what the planner
+counted. The split is a compiler's: the planner is the front end and decides
+*what* to build, the model is the back end and decides *where it goes*. The plan
+rides in the prompt, so the model is conditioned on the ratios rather than asked
+to invent them; a mis-remembered ratio produces a factory that looks perfect and
+starves, and there is no reason to buy a probabilistic version of a table that
+is already exact.
+
+A chain is not always a line. `plan.modules` catalogues 29 targets, and five of
+them branch: the last machine wants two items that both have to be made, which a
+run of stacked bands cannot deliver — a belt hands its product downstream and
+nowhere else, so the first of the two would sail past the row that wants it.
+`plan.fork` splits such a plan into two branches converging on its last stage,
+and `synth` draws them as two bottom-aligned columns dropping onto one belt with
+that stage beneath it. Which of the two layouts a target gets is derived from
+the plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
 
 Two decisions matter more than the rest:
 
@@ -146,23 +203,38 @@ loss would then be measuring memorisation. Whole designs move together,
 augmentations and all, and "the same design" is decided by a canonical form that
 sees through rotation, reflection and belt tier.
 
-A 20,000-draw build measures 4,408 distinct layouts, 38,405 documents and 7.46M
-training tokens at a 495-token vocabulary. The other 15,592 draws were forms of
-a layout already kept, and 41,595 of the expanded documents came out
-byte-identical to one already written — drawing at random from ten generators
-collides, and the manifest says by how much. The 6,000 draws
-`examples/factorio.sh` defaults to give 2,439 layouts and 3.17M tokens, already
-more than a 3.5M-parameter model gets through in half an hour.
+*Draws are weighted, not uniform.* `synth.WEIGHTS` gives 45% of the mixture to
+the module generator and the rest to the other ten in proportion — a draw from a
+generator that has run out of things to say costs a draw and adds nothing, and
+`experiments/saturation.py` says which ones those are. `build --module-weight`
+moves that share without touching the proportions among the rest.
+
+A 20,000-draw build measures 10,498 distinct layouts, 66,004 documents and
+14.12M training tokens at a 739-token vocabulary; 4,376 of the layouts are
+modules. The other 9,502 draws were forms of a layout already kept, and 13,996
+of the expanded documents came out byte-identical to one already written —
+drawing from eleven generators collides, and the manifest says by how much. The
+6,000 draws `examples/factorio.sh` defaults to give 4,304 layouts and 4.65M
+tokens, already more than a 3.6M-parameter model gets through in half an hour.
+
+Building it is pure Python and runs before the GPU gets to do anything, so what
+it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and
+the answer is that the generators are not it. Almost all of the time goes into
+deduplication — `augment.canonical` puts every design through eight rigid
+motions to compare them, and each of those rebuilds every `Placement` three
+times over. That is where `Placement.moved` and the running-minimum `bounds`
+come from; they are unremarkable code with a measured reason.
 
 ### Where the generators run out
 
 Raising `--count` past that stops helping, and `experiments/saturation.py` says
-where. 3,200 draws from each of the ten generators — 32,000 in all — yield 6,344
-distinct layouts between them:
+where. 3,200 draws from each of the eleven generators — 35,200 in all — yield
+8,362 distinct layouts between them:
 
 | generator | 200 draws | 800 | 3200 | distinct per draw |
 | --- | ---: | ---: | ---: | ---: |
 | belt-lane | 192 | 730 | 2684 | 84% |
+| module | 185 | 636 | 2018 | 63% |
 | bus-tap | 183 | 592 | 1400 | 44% |
 | assembler-row | 181 | 540 | 1021 | 32% |
 | mall-cell | 168 | 404 | 551 | 17% |
@@ -173,19 +245,23 @@ distinct layouts between them:
 | lab-block | 53 | 56 | 56 | 2% |
 | mining-outpost | 37 | 43 | 44 | 1% |
 
-Six of the ten are finished by their four-hundredth draw. A mining outpost has
-44 forms in total, a lab block 56 — every further draw is one of those again.
-Only the belt lane still climbs, and a belt lane is the least interesting thing
-in the corpus: its parameter space is large precisely because nothing constrains
-it. So the synthetic ceiling is roughly 6,300 layouts, about 11M tokens.
+Six of the eleven are finished by their four-hundredth draw. A mining outpost
+has 44 forms in total, a lab block 56 — every further draw is one of those
+again. Two still climb at 3,200: the belt lane, which is the least interesting
+thing in the corpus because its parameter space is large precisely to the extent
+that nothing constrains it, and the module generator, whose space is the product
+of a target item, a chain the planner can lay out, a zone, and where its ports
+sit. That table is why the mixture is weighted at all: 20,000 weighted draws
+measure 10,498 layouts where 35,200 flat ones measure 8,362, because the draws
+that would have gone to a generator with 44 forms in it go to the two that are
+still saying something new.
 
 That is the number the training budget has to be read against. `factorio-nano`
-is 3.5M parameters, so the Chinchilla rule asks for 70.4M training tokens —
-nearly seven epochs over everything the generators can produce, and nine over
-what a 20,000-draw build contains. Data-constrained scaling laws put the point
-where repeating stops being nearly free at about four epochs, which means a
-Chinchilla-budget run needs ~17.6M *unique* tokens and the generators cannot get
-there alone. More variety, not more draws.
+is 3.6M parameters, so the Chinchilla rule asks for 71.4M training tokens — five
+epochs over what a 20,000-draw build contains. Data-constrained scaling laws put
+the point where repeating stops being nearly free at about four epochs, which
+means a Chinchilla-budget run needs ~17.9M *unique* tokens and the generators
+still do not quite get there alone. More variety, not more draws.
 
 ### Human blueprints
 
@@ -236,13 +312,13 @@ and a book holds seventeen blueprints on average:
 | larger than 64x64 | 338 |
 
 14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
-mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. The
-generators top out around 11M tokens and the Chinchilla budget is 70.4M, so
-synthetic-only is seven passes over everything they can say, where the
+mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. A
+20,000-draw synthetic build is 14.1M tokens against a Chinchilla budget of
+71.4M, so synthetic-only is five passes over everything it can say, where the
 data-constrained scaling laws put the point at which repeating stops being
-nearly free at four. 11M + 7.8M is 18.8M unique tokens against the 17.6M that
+nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.9M that
 four epochs of the budget need: the human half is not a garnish here, it is what
-moves the run from seven epochs to under four.
+puts the run under four epochs instead of over.
 
 The single largest rejection class is size: what people
 publish is whole factories, and the grammar addresses a 64x64 tile grid with at
@@ -277,6 +353,56 @@ constraints and the soft ones:
 | `inserters connected` | an inserter with something on both sides |
 | `belts lead somewhere` | a belt whose next tile is not empty ground |
 | `quality` | zero if invalid, else the mean of the three above |
+
+Everything in that table is a property of a tidy arrangement, and the run in
+issue #17 finished with five of the six at 1.000. `experiments/grader_blindspots.py`
+is what that turned out to mean: take module draws the grader calls flawless,
+break exactly one thing, and ask again. Over 200 draws —
+
+| perturbation | valid | quality | perfect | flow |
+| --- | ---: | ---: | ---: | ---: |
+| untouched | 1.000 | 1.000 | 1.000 | 1.000 |
+| one assembler retargeted to a recipe the belts do not carry | 1.000 | 1.000 | **1.000** | 0.373 |
+| one inserter turned end for end | 1.000 | 1.000 | **1.000** | 0.422 |
+| the inserter that takes the product away deleted | 1.000 | 1.000 | **1.000** | 0.422 |
+
+— `perfect` being the fraction scoring 1.0 on *every* metric above. It is 1.000
+in all three rows: a factory that provably cannot work scores a perfect mark.
+So there is a second tier, which asks whether items can reach the machines
+rather than whether the arrangement is legal:
+
+| | |
+| --- | --- |
+| `fed` | fraction of machines whose ingredients can actually reach them |
+| `delivers` | the declared output leaves through the declared port |
+| `working` | machines that are both fed and can hand their product on |
+| `mixed` | belts carrying more than the two item types a belt holds |
+| `leaks` | a belt spilling an item off the edge at no declared port |
+| `within zone` | nothing outside the zone the spec asked for |
+| `flow` | zero if invalid, else `0.7 delivers + 0.3 fed` |
+
+`flow.py` computes it as a fixed point over item sets, by the game's rules and
+not by intuition: an inserter faces the tile it inserts *into* and picks up from
+the opposite one, a belt leads into the tile it faces, a belt feeds another belt
+and never a machine, and a belt holds at most two item types. It is deliberately
+optimistic — throughput, belt sides and furnace fuel are not modelled — because
+its job is to separate a factory that works from one that is decorative, which
+the table above says the first tier cannot do.
+
+`flow()` is reported *beside* `quality()` and never folded into it. The two
+measure different failures, decoration versus a broken chain, and one average
+would let either hide the other — which is exactly how the analysed run ended up
+with a headline number that had nothing left to say. The whole argument, and
+what follows from it, is `docs/FACTORIO.md`.
+
+Averaging over the benchmark hides it a second way, so `--kind` cuts the slice
+out. Ten of the eleven generators come out legal from the first checkpoint, and
+a module that delivers nothing moves `quality` by a fortieth; `grade --kind
+module` scores that generator's generations alone under a `== GRADE MODULES ==`
+rule of their own, and `plot --kind` draws `delivers`, `fed` and `working` over
+that slice as a panel next to loss and perplexity. The filter reads the `kind`
+field `generate` copied out of the prompt record, so nothing has to be matched
+back up to a specification by hand.
 
 Failures are counted by reason, so a run that scores zero still says *why* — and
 the contact sheet is sorted by score rather than sampled, because the

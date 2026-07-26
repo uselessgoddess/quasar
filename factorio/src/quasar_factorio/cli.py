@@ -25,7 +25,7 @@ import json
 import pathlib
 import random
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
 from . import blueprint as bp
 from . import dataset, grammar, plots, prototypes, render, synth, validate
@@ -63,6 +63,14 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--valid-every", type=int, default=dataset.VALID_EVERY)
     build.add_argument("--prompts", type=int, default=256, help="held-out eval prompts")
     build.add_argument(
+        "--module-weight",
+        type=float,
+        default=0.45,
+        metavar="SHARE",
+        help="fraction of the draws spent on the module task; the rest of the "
+        "mixture keeps its proportions (default: 0.45)",
+    )
+    build.add_argument(
         "--real",
         type=pathlib.Path,
         help="also mix in human blueprints from a cache written by tools/fetch_blueprints.py",
@@ -93,6 +101,12 @@ def _parser() -> argparse.ArgumentParser:
     grade.add_argument("--json", type=pathlib.Path, help="also write the summary as json")
     grade.add_argument("--columns", type=int, default=4)
     grade.add_argument(
+        "--kind",
+        help="score only generations whose prompt came from this generator, "
+        "e.g. `module` for the one task the legality metrics do not already "
+        "read 1.000 on",
+    )
+    grade.add_argument(
         "--order",
         choices=("best", "worst", "given"),
         default="best",
@@ -111,6 +125,11 @@ def _parser() -> argparse.ArgumentParser:
         default=(),
         metavar="SAMPLES.JSONL",
         help="also plot the grader; several files draw the curve over training",
+    )
+    plot.add_argument(
+        "--kind",
+        default="module",
+        help="the generator that gets a flow panel of its own (default: module); empty for none",
     )
     plot.add_argument("--columns", type=int, default=2)
     plot.set_defaults(run=_plot)
@@ -165,6 +184,7 @@ def _build(args) -> int:
         extra=extra,
         valid_every=args.valid_every,
         prompts=args.prompts,
+        weights=synth.mixture(args.module_weight),
     )
     _rule("CORPUS", str(args.out))
     _rows(
@@ -230,13 +250,18 @@ def _heatmap(args) -> int:
 
 def _grade(args) -> int:
     data = prototypes.load()
-    samples = list(_samples(args.samples))
+    samples = _of_kind(_samples(args.samples), args.kind)
     if not samples:
-        raise ValueError(f"no samples in {args.samples}")
+        what = f"no {args.kind} samples" if args.kind else "no samples"
+        raise ValueError(f"{what} in {args.samples}")
     reports = [(sample, validate.grade(sample["text"], data)) for sample in samples]
     summary = validate.summarise([report for _, report in reports])
 
-    _rule("GRADE", str(args.samples))
+    # `GRADE MODULES`, not a second `GRADE`: a run grades the whole benchmark
+    # and then the module slice of it, and two blocks under the same heading
+    # are two blocks nobody can point at. The plural is the generator's name
+    # with an `s`, which is what every one of them reads as.
+    _rule(f"GRADE {args.kind.upper()}S" if args.kind else "GRADE", str(args.samples))
     _rows([("samples", summary.samples)])
     for name, value in [
         ("parses", summary.parse_rate),
@@ -249,6 +274,36 @@ def _grade(args) -> int:
     ]:
         _bar(name, value, f"{value:.3f}")
     _rows([("mean entities", f"{summary.mean_entities:.1f}")])
+
+    # Reported apart from the block above because it answers a different
+    # question. Everything above is legality; this is whether items move.
+    # The denominators are on the rule because they are not `samples`: a design
+    # with no machine is not a design whose machines are idle, and a belt lane
+    # averaged in as a zero would report the benchmark's composition instead.
+    _rule(
+        "ITEM FLOW",
+        f"{summary.ported} ported, {summary.crafting} crafting, "
+        f"{summary.flowing} scored of {summary.samples}",
+    )
+    flow_rows = [
+        ("machines fed", summary.mean_fed),
+        ("machines working", summary.mean_working),
+        ("flow score", summary.mean_flow),
+    ]
+    if summary.ported:
+        flow_rows = [
+            ("outputs delivered", summary.mean_delivers),
+            *flow_rows,
+            ("inside the zone", summary.zone_rate),
+        ]
+    for name, value in flow_rows:
+        _bar(name, value, f"{value:.3f}")
+    _rows(
+        [
+            ("designs leaking items", f"{summary.leak_rate:.3f}"),
+            ("belts over two items", f"{summary.mixed_rate:.3f}"),
+        ]
+    )
 
     if summary.errors:
         _rule("WHY IT FAILED")
@@ -276,9 +331,12 @@ def _plot(args) -> int:
         raise ValueError(f"no training metrics in {args.log}")
     panels = plots.training_panels(run)
 
-    graded = [(_step_of(path), _summary_of(path)) for path in args.grade]
+    graded = _summaries(args.grade)
     if graded:
-        panels.extend(_grade_panels(sorted(graded)))
+        # `--kind ''` asks for no panel of its own; an empty filter would
+        # otherwise mean "every kind", which is the panel already drawn.
+        sliced = _summaries(args.grade, args.kind) if args.kind else []
+        panels.extend(_grade_panels(graded, sliced, args.kind))
 
     _write(args.out, plots.board(panels, columns=args.columns).png())
     _rule("PLOT", str(args.out))
@@ -294,13 +352,22 @@ def _plot(args) -> int:
     return 0
 
 
-def _grade_panels(graded: Sequence[tuple[float, validate.Summary]]) -> list[render.Raster]:
+def _grade_panels(
+    graded: Sequence[tuple[float, validate.Summary]],
+    modules: Sequence[tuple[float, validate.Summary]] = (),
+    kind: str = "module",
+) -> list[render.Raster]:
     """Grader panels: the verdict now, and — with more than one file — over time."""
+    # `flow` last and deliberately in the same panel as the rest: the point of
+    # the analysis this came out of is that the legality metrics saturate while
+    # the flow metric still has somewhere to go, and putting them on separate
+    # charts would hide exactly that comparison.
     metrics = (
         ("valid", plots.INKS[3], lambda s: s.valid_rate),
         ("parses", plots.INKS[0], lambda s: s.parse_rate),
         ("spec", plots.INKS[2], lambda s: s.spec_rate),
         ("quality", plots.INKS[1], lambda s: s.mean_quality),
+        ("flow", plots.INKS[5], lambda s: s.mean_flow),
     )
     step, last = graded[-1]
     panels = [
@@ -321,6 +388,7 @@ def _grade_panels(graded: Sequence[tuple[float, validate.Summary]]) -> list[rend
                 floor=0.0,
             )
         )
+    panels.extend(_flow_panels(modules, kind))
     if last.errors:
         worst = sorted(last.errors.items(), key=lambda item: -item[1])[:6]
         panels.append(plots.bars([(m[:16], n) for m, n in worst], title="WHY IT FAILED"))
@@ -337,12 +405,77 @@ def _step_of(path: pathlib.Path) -> float:
     return float(digits[-1]) if digits else 0.0
 
 
-def _summary_of(path: pathlib.Path) -> validate.Summary:
+def _flow_panels(
+    modules: Sequence[tuple[float, validate.Summary]], kind: str
+) -> list[render.Raster]:
+    """The one task that is not already solved, on a chart of its own.
+
+    Everything on `GRADE OVER TRAINING` is averaged over the whole benchmark,
+    and the whole benchmark is mostly belt lanes and assembler rows that come
+    out legal from the first checkpoint. Averaged in, a module that delivers
+    nothing moves the number by a fortieth. Here it is the number.
+    """
+    if not modules:
+        return []
+    metrics = (
+        ("delivers", plots.INKS[3], lambda s: s.mean_delivers),
+        ("fed", plots.INKS[1], lambda s: s.mean_fed),
+        ("working", plots.INKS[2], lambda s: s.mean_working),
+        ("quality", plots.INKS[0], lambda s: s.mean_quality),
+    )
+    step, last = modules[-1]
+    panels = [
+        plots.bars(
+            [(name, read(last)) for name, _, read in metrics],
+            title=f"{kind.upper()} FLOW AT STEP {step:.0f} ({last.samples} SAMPLES)",
+            top=1.0,
+        )
+    ]
+    if len(modules) > 1:
+        panels.append(
+            plots.chart(
+                [
+                    plots.Series(name, tuple((at, read(s)) for at, s in modules), color)
+                    for name, color, read in metrics
+                ],
+                title=f"{kind.upper()} FLOW OVER TRAINING",
+                floor=0.0,
+            )
+        )
+    return panels
+
+
+def _of_kind(samples: Iterable[dict], kind: str | None) -> list[dict]:
+    """The generations whose prompt came from one generator.
+
+    `quasar generate` copies every field of a prompt record into the sample it
+    writes, so the kind rides along with the generation and nothing has to be
+    matched up afterwards. A sample with no `kind` at all — a hand-written
+    prompt file — belongs to no generator and is dropped rather than counted.
+    """
+    samples = list(samples)
+    return samples if not kind else [s for s in samples if s.get("kind") == kind]
+
+
+def _summaries(
+    paths: Sequence[pathlib.Path], kind: str | None = None
+) -> list[tuple[float, validate.Summary]]:
+    """One summary per samples file, in step order.
+
+    A checkpoint with no sample of `kind` contributes no point rather than a
+    zero: a model that was never asked for a module has not failed to build
+    one, and a zero would draw a curve that says it did.
+    """
     data = prototypes.load()
-    reports = [validate.grade(sample["text"], data) for sample in _samples(path)]
-    if not reports:
-        raise ValueError(f"no samples in {path}")
-    return validate.summarise(reports)
+    graded = []
+    for path in paths:
+        samples = _of_kind(_samples(path), kind)
+        if not samples and kind is None:
+            raise ValueError(f"no samples in {path}")
+        if samples:
+            reports = [validate.grade(sample["text"], data) for sample in samples]
+            graded.append((_step_of(path), validate.summarise(reports)))
+    return sorted(graded, key=lambda point: point[0])
 
 
 def _render(args) -> int:
@@ -473,7 +606,12 @@ def _sheet(out, reports, data, *, columns: int, order: str) -> None:
 
 
 def _caption(report: validate.Report) -> list[str]:
-    """Two lines of grader verdict, which is all a card has room for."""
+    """Up to three lines of grader verdict, which is all a card has room for.
+
+    The third line only appears for a design that declared ports, and it says
+    the one thing a reader cannot see by looking at the picture: whether the
+    item the module promised actually comes out of it.
+    """
     if not report.parsed:
         return [f"PARSE FAIL AT {report.error_at}", report.error[:38].upper()]
     head = "VALID" if report.valid else "INVALID"
@@ -483,11 +621,15 @@ def _caption(report: validate.Report) -> list[str]:
         head += " OFF GRID"
     elif report.illegal_recipes:
         head += f" BAD RECIPE {report.illegal_recipes}"
-    return [
+    lines = [
         f"{head}  {report.entities} ENT  {report.width}X{report.height}",
         f"PWR {report.powered:.2f}  INS {report.connected_inserters:.2f}"
         f"  BLT {report.belts_lead_somewhere:.2f}",
     ]
+    if report.ported:
+        starved = f" MISSING {report.missing[0][:14].upper()}" if report.missing else ""
+        lines.append(f"OUT {report.delivers:.2f}  FED {report.fed:.2f}{starved}")
+    return lines
 
 
 def _read(path: pathlib.Path) -> str:

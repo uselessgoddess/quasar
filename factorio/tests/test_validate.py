@@ -2,7 +2,7 @@
 
 from quasar_factorio import grammar, prototypes, validate
 from quasar_factorio.blueprint import Blueprint, Placement
-from quasar_factorio.grammar import Spec
+from quasar_factorio.grammar import Port, Spec
 from quasar_factorio.prototypes import EAST, NORTH, SOUTH, WEST
 
 DATA = prototypes.load()
@@ -202,3 +202,96 @@ def test_summaries_aggregate_and_bucket_errors_by_shape():
 
 def test_an_empty_batch_summarises_to_zero_rather_than_dividing_by_it():
     assert validate.summarise([]).samples == 0
+
+
+def test_flow_is_reported_apart_from_quality_so_neither_can_hide_the_other():
+    """The lesson of the measured run, as an assertion.
+
+    Every local metric is at ceiling for this design — powered, both inserters
+    connected, the belt leads somewhere — and it makes nothing, because the
+    assembler is set to a recipe the belt does not carry.
+    """
+    starved = graded(
+        # Facing west off the left edge, so every belt leads somewhere.
+        Placement("transport-belt", 0, 0, WEST),
+        Placement("inserter", 0, 1, SOUTH),
+        Placement("assembling-machine-1", 0, 2, NORTH, recipe="electronic-circuit"),
+        Placement("inserter", 0, 5, SOUTH),
+        Placement("transport-belt", 0, 6, WEST),
+        Placement("medium-electric-pole", 4, 3),
+        spec=Spec(
+            "module",
+            "electronic-circuit",
+            1,
+            8,
+            8,
+            ports=(
+                Port("in", "copper-plate", 0, 0, "n"),
+                Port("out", "electronic-circuit", 0, 6, "s"),
+            ),
+        ),
+    )
+    assert starved.quality() == 1.0
+    assert starved.flows() == 0.0
+    assert starved.missing == ("electronic-circuit",)
+
+
+def test_flow_is_zero_for_a_design_the_game_would_refuse():
+    """For the same reason quality is: an overlap cannot be pasted, so what
+    would have flowed through it is not a fact about anything."""
+    report = graded(
+        Placement("assembling-machine-1", 0, 0, recipe="copper-cable"),
+        Placement("assembling-machine-1", 1, 1, recipe="copper-cable"),
+    )
+    assert not report.valid
+    assert report.flows() == 0.0
+
+
+def test_a_design_with_no_output_port_is_scored_on_being_fed_alone():
+    """A belt lane has nothing to deliver, and averaging in a zero for failing to
+    deliver it would make the flow number track the task mix instead of the model."""
+    lane = graded(*[Placement("transport-belt", index, 0, EAST) for index in range(4)])
+    assert not lane.ported
+    assert lane.flows() == lane.fed
+
+
+def test_summaries_average_flow_over_the_designs_that_have_any():
+    good = validate.grade(
+        "<bp> <e> transport-belt x00 y00 d2 <e> transport-belt x01 y00 d2 </bp>", DATA
+    )
+    broken = validate.grade("<bp> <e> not-a-thing x00 y00 d0 </bp>", DATA)
+    summary = validate.summarise([good, broken])
+    # Averaged over the one design that parsed: counting the unparseable one as
+    # a flow failure would make flow a slower, noisier copy of validity.
+    assert summary.mean_fed == good.fed
+    assert summary.ported == 0
+
+
+def test_a_design_with_no_machines_is_not_averaged_in_as_an_idle_one():
+    """The bug the first GPU run printed: `machines fed 0.234` on a batch whose
+    machines were mostly fine, because most of the batch had no machines.
+
+    `fed` is a fraction with `machines` underneath it, and `trace` reports 0.0
+    when that denominator is zero — the honest answer to a question nobody asked.
+    Averaging those in makes the headline number a measure of how much of the
+    benchmark contains machinery, which is a property of the benchmark.
+    """
+    fed = graded(
+        # Leftmost tile, so the belt runs in from off the edge and is seeded.
+        Placement("transport-belt", 0, 0, EAST),
+        Placement("inserter", 0, 1, SOUTH),
+        Placement("assembling-machine-1", 0, 2, NORTH, recipe="copper-cable"),
+        Placement("medium-electric-pole", 4, 3),
+    )
+    lane = graded(*[Placement("transport-belt", index, 0, EAST) for index in range(4)])
+    assert (fed.machines, fed.fed) == (1, 1.0)
+    assert (lane.machines, lane.fed) == (0, 0.0)
+
+    summary = validate.summarise([fed, lane])
+    assert summary.crafting == 1
+    assert summary.mean_fed == 1.0, "the machine-free lane was counted as an unfed machine"
+    # The lane still has a flow score of its own — `flows()` falls back to `fed`
+    # for an unported design — but it is not a design flow can be asked about,
+    # so it is out of the flow average too rather than half in it.
+    assert not lane.asks_about_flow() and fed.asks_about_flow()
+    assert (summary.flowing, summary.mean_flow) == (1, 1.0)

@@ -106,11 +106,17 @@ class Data:
     entities: dict[str, Entity]
     recipes: dict[str, Recipe]
     stack_sizes: dict[str, int]
+    #: Names `data.raw` files under `fluid`. Held separately from `stack_sizes`
+    #: so that "needs a pipe" is a fact the table states rather than something
+    #: inferred from an item being absent — an inference that was wrong for
+    #: every science pack for as long as only `data.raw.item` was distilled.
+    fluids: frozenset[str] = frozenset()
 
     def entity(self, name: str) -> Entity | None:
         return self.entities.get(name)
 
-    def crafters_for(self, recipe: Recipe) -> list[Entity]:
+    @functools.cache  # noqa: B019 - `load` hands out one instance for the process
+    def crafters_for(self, recipe: Recipe) -> tuple[Entity, ...]:
         """Machines that can run `recipe`, fastest last.
 
         Ties break by name so the list is stable across runs; the planner picks
@@ -121,17 +127,23 @@ class Data:
             for entity in self.entities.values()
             if recipe.category in entity.crafting_categories
         ]
-        return sorted(able, key=lambda entity: (entity.crafting_speed or 0.0, entity.name))
+        return tuple(sorted(able, key=lambda entity: (entity.crafting_speed or 0.0, entity.name)))
 
-    def producers_of(self, item: str) -> list[Recipe]:
+    @functools.cache  # noqa: B019 - see `crafters_for`
+    def producers_of(self, item: str) -> tuple[Recipe, ...]:
         """Recipes yielding `item`, cheapest first by ingredient count.
 
         Oil products have several routes; preferring the shortest ingredient
         list picks basic over advanced processing, which is what a starter base
         wants and what the planner documents as its bias.
+
+        Cached, and returning a tuple so that caching is safe: this is a full
+        scan of the recipe table, `plan.solve` walks a crafting tree calling it
+        at every node, and the module generator solves a tree per draw. Without
+        the cache it is the single most expensive thing in a corpus build.
         """
         made = [recipe for recipe in self.recipes.values() if recipe.yields(item) > 0]
-        return sorted(made, key=lambda recipe: (len(recipe.ingredients), recipe.name))
+        return tuple(sorted(made, key=lambda recipe: (len(recipe.ingredients), recipe.name)))
 
 
 @functools.cache
@@ -173,4 +185,5 @@ def load(path: pathlib.Path | None = None) -> Data:
         entities=entities,
         recipes=recipes,
         stack_sizes={name: body["stack_size"] for name, body in blob.get("items", {}).items()},
+        fluids=frozenset(blob.get("fluids", ())),
     )

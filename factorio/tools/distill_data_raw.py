@@ -29,7 +29,7 @@ import urllib.request
 # The community mirror of the vanilla prototype dump. It is the same JSON the
 # data.raw visualiser (https://jackhugh.github.io/factorio-data-raw-visualiser/)
 # renders, so anything asserted here can be checked by eye in a browser.
-SOURCE = "https://jackhugh.github.io/factorio-data-raw-visualiser/data.json"
+SOURCE = "https://jackhugh.github.io/factorio-data-raw-visualiser/data-raw.json"
 
 # Prototype categories that can appear inside a blueprint and that this harness
 # models. Anything outside this list is dropped from a blueprint during import
@@ -188,6 +188,29 @@ def recipe_body(recipe: dict) -> dict | None:
     }
 
 
+def stacks(raw: dict) -> dict:
+    """Stack size of everything that can sit in an inventory, whatever its type.
+
+    `data.raw.item` is not the item table: Factorio files a science pack under
+    `tool`, a gear under `item`, a piercing round under `ammo`, a speed module
+    under `module` and a car under `item-with-entity-data`. Reading only `item`
+    loses 61 of the 214 things vanilla recipes name, and the harness reads this
+    table as "can a belt carry it" (`plan.is_fluid`), so the omission does not
+    look like missing data — it looks like `automation-science-pack` being a
+    fluid, and a science module being unbuildable for a reason that has nothing
+    to do with science. The honest test is the field itself: a prototype with a
+    `stack_size` stacks.
+    """
+    out: dict[str, dict] = {}
+    for protos in raw.values():
+        if not isinstance(protos, dict):
+            continue
+        for name, proto in protos.items():
+            if isinstance(proto, dict) and "stack_size" in proto:
+                out[str(name)] = {"stack_size": proto["stack_size"]}
+    return dict(sorted(out.items()))
+
+
 def entities(raw: dict) -> dict:
     """Per-entity geometry and the few gameplay numbers the planner needs."""
     out = {}
@@ -270,15 +293,17 @@ def main() -> int:
         },
         "entities": entities(raw),
         "recipes": recipes,
-        "items": {
-            name: {"stack_size": proto.get("stack_size", 50)}
-            for name, proto in sorted(raw.get("item", {}).items())
-        },
+        "items": stacks(raw),
+        # Recorded as itself rather than inferred from the absence of a stack
+        # size, so that "this is a fluid" and "this prototype was not distilled"
+        # stay two different statements.
+        "fluids": sorted(raw.get("fluid", {})),
     }
 
     args.out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n")
     print(
-        f"{args.out}: {len(table['entities'])} entities, {len(table['recipes'])} recipes",
+        f"{args.out}: {len(table['entities'])} entities, {len(table['recipes'])} recipes, "
+        f"{len(table['items'])} items, {len(table['fluids'])} fluids",
         file=sys.stderr,
     )
     return 0

@@ -91,6 +91,35 @@ def test_augmenting_never_degrades_a_design(kind):
     assert summary.mean_belts == 1.0
 
 
+def test_a_rotated_module_still_delivers_through_its_rotated_ports():
+    """The reason a port is a tile and a side rather than a name for an edge.
+
+    Rotate the design and the ports have to follow it exactly, or the prompt now
+    promises iron plate arriving somewhere the belt no longer is — and the
+    document teaches the model that the ports in its prompt mean nothing.
+
+    A third of module draws state a zone larger than they fill, and those are
+    the ones this is really for: the design is pinned to the corner of its zone
+    when it is drawn and to the corner again after it is turned, which is a
+    different corner of a differently-shaped zone. It survives because nothing
+    records where in the zone the design sits — a port names a tile of the
+    design, and the zone check compares sizes — but that is the sort of thing
+    that is true until someone writes a port as an offset along an edge.
+    """
+    slack = 0
+    for seed in range(40):
+        rng = random.Random(seed)
+        blueprint, spec = synth.module(rng, DATA)
+        slack += (spec.width, spec.height) != blueprint.extent(DATA)
+        forms = augment.variants(blueprint, spec, DATA, rng=rng, limit=8)
+        assert len(forms) >= 4, (seed, "a module has more than four forms to teach")
+        for form, form_spec in forms:
+            report = validate.grade(grammar.serialise(form, DATA, form_spec), DATA)
+            assert (report.delivers, report.fed) == (1.0, 1.0), (seed, form_spec.product)
+            assert report.within_zone and report.spec_honoured, (seed, form_spec.product)
+    assert slack, "no draw stated a zone bigger than it filled; the case above went untested"
+
+
 def test_a_symmetric_design_collapses_instead_of_duplicating():
     """A straight belt lane has four orientations, not eight.
 

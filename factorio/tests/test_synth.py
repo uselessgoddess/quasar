@@ -10,7 +10,7 @@ import random
 
 import pytest
 
-from quasar_factorio import grammar, prototypes, synth, validate
+from quasar_factorio import augment, flow, grammar, plan, prototypes, synth, validate
 from quasar_factorio.blueprint import GRID
 
 DATA = prototypes.load()
@@ -99,3 +99,123 @@ def test_recipes_are_only_ever_paired_with_machines_that_can_run_them():
     for index in range(300):
         blueprint, _ = synth.sample(random.Random(index), DATA)
         assert validate.illegal_recipes(blueprint, DATA) == 0
+
+
+FORKS = tuple(module for module in plan.modules(DATA) if module.shape == "fork")
+
+
+def test_every_module_draw_makes_the_item_it_advertises():
+    """The contract the other generators cannot be held to.
+
+    A belt lane or a mall row is legal or it is not; a module additionally has to
+    *work*, and that is checkable because the spec says what goes in and what
+    should come out. Anything less than 1.0 here means the corpus is teaching a
+    layout that starves, which is precisely the failure the local metrics missed.
+
+    Both shapes go through this loop, and the products are collected so that the
+    branching ones are covered on purpose rather than by luck: a fork is the
+    layout most likely to starve, because its last machine is fed by two columns
+    and being wrong about either one of them is enough.
+    """
+    products = set()
+    for blueprint, spec in draw(synth.module, 200):
+        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+        assert report.ported, spec.product
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0), spec.product
+        assert (report.mixed, report.leaks) == (0, 0), spec.product
+        assert report.within_zone, spec.product
+        products.add(spec.product)
+    assert {module.product for module in FORKS} <= products
+    assert products - {module.product for module in FORKS}  # and stacks too
+
+
+def test_a_branching_module_is_two_columns_and_not_a_deeper_stack():
+    """The geometry the flow report cannot tell apart from a lucky stack.
+
+    A fork exists because its last machine wants two made items, and a single
+    column of bands can deliver only one of them — but it also exists to keep the
+    lanes honest, and that part is geometry: two branches with two sets of raws
+    need two belts per row, not one wide one carrying the union. So every band
+    row of a fork holds a pair of runs pointed at each other, one fed from each
+    edge, ending nose to nose against the pole between them.
+
+    Read off the builder's own output rather than a draw from `module`, which
+    rotates what it is given and would turn the rows into columns.
+    """
+    for index, target in enumerate(FORKS):
+        for seed in range(6):
+            rng = random.Random(seed * 31 + index)
+            blueprint, ports, _ = synth._forked(rng, DATA, target, synth.Layout.draw(rng))
+            rows = {}
+            for placement in blueprint.entities:
+                if DATA.entity(placement.name).category in flow.BELTS:
+                    rows.setdefault(placement.y, set()).add(placement.direction)
+            assert any(len(runs) > 1 for runs in rows.values()), (target, seed)
+            # One way in per branch per band, and exactly one way out.
+            assert [port.role for port in ports].count("out") == 1, target
+            assert {port.side for port in ports if port.role == "in"} == {"w", "e"}, target
+
+
+def test_a_module_declares_a_port_for_everything_it_is_handed_and_makes():
+    for _, spec in draw(synth.module, 60):
+        assert spec.outputs()
+        assert {port.item for port in spec.outputs()} == {spec.product}
+        # Every input port names an item some stage of the plan actually takes,
+        # so no port in the prompt is a promise the design cannot use.
+        wanted = set()
+        for step in spec.plan:
+            recipe = DATA.recipes[step.recipe]
+            wanted |= {name for name, _ in recipe.ingredients}
+        assert {port.item for port in spec.inputs()} <= wanted
+
+
+def test_a_module_port_sits_on_a_belt_at_the_edge_it_names():
+    edges = {"n": lambda x, y, w, h: y == 0, "s": lambda x, y, w, h: y == h - 1}
+    edges |= {"w": lambda x, y, w, h: x == 0, "e": lambda x, y, w, h: x == w - 1}
+    for blueprint, spec in draw(synth.module, 60):
+        width, height = blueprint.extent(DATA)
+        occupied = {
+            tile: placement for placement in blueprint.entities for tile in placement.tiles(DATA)
+        }
+        for port in spec.ports:
+            assert edges[port.side](port.x, port.y, width, height), port
+            placement = occupied.get((port.x, port.y))
+            assert placement is not None, port
+            assert DATA.entity(placement.name).category in flow.BELTS, port
+
+
+def test_the_module_generator_does_not_run_out_of_layouts():
+    """Counted the way the corpus builder counts, which is the only way that pays.
+
+    A generator that draws the same design twice contributes it once: the build
+    deduplicates on `augment.canonical`, which sees through rotation, reflection
+    and tier. Before `synth.Layout` the module generator varied nothing else, so
+    twenty catalogue entries times a couple of machine budgets was the whole of
+    it — forty-five designs, and the thousandth draw added nothing to the corpus
+    that the fiftieth had not. This is the assertion that keeps that from
+    quietly coming back; `experiments/module_yield.py` prints the curve.
+    """
+    keys = {augment.canonical(blueprint, DATA) for blueprint, _ in draw(synth.module, 200)}
+    assert len(keys) > 120
+
+
+def test_a_module_plan_is_the_planner_s_plan_and_not_a_guess():
+    for _, spec in draw(synth.module, 40):
+        supply = {port.item for port in spec.inputs()}
+        # Matched as a set: the ports come out in layout order, which is the
+        # order the belts are stacked in and not the order the catalogue lists.
+        catalogued = [
+            module
+            for module in plan.modules(DATA)
+            if module.product == spec.product and set(module.supply) == supply
+        ]
+        assert catalogued, (spec.product, supply)
+        machines = sum(step.count for step in spec.plan)
+        unit = plan.fit(
+            DATA,
+            spec.product,
+            catalogued[0].supply,
+            machines=machines,
+            depth=catalogued[0].depth,
+        )
+        assert unit.steps() == spec.plan

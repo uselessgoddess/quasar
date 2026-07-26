@@ -532,6 +532,17 @@
    "width": 1
   }
  },
+ "fluids": [
+  "crude-oil",
+  "fluid-unknown",
+  "heavy-oil",
+  "light-oil",
+  "lubricant",
+  "petroleum-gas",
+  "steam",
+  "sulfuric-acid",
+  "water"
+ ],
  "items": {
   "accumulator": {
    "stack_size": 50
@@ -542,8 +553,20 @@
   "arithmetic-combinator": {
    "stack_size": 50
   },
+  "artillery-shell": {
+   "stack_size": 1
+  },
+  "artillery-targeting-remote": {
+   "stack_size": 1
+  },
   "artillery-turret": {
    "stack_size": 10
+  },
+  "artillery-wagon": {
+   "stack_size": 5
+  },
+  "artillery-wagon-cannon": {
+   "stack_size": 1
   },
   "assembling-machine-1": {
    "stack_size": 50
@@ -553,6 +576,12 @@
   },
   "assembling-machine-3": {
    "stack_size": 50
+  },
+  "atomic-bomb": {
+   "stack_size": 10
+  },
+  "automation-science-pack": {
+   "stack_size": 200
   },
   "battery": {
    "stack_size": 200
@@ -572,6 +601,12 @@
   "big-electric-pole": {
    "stack_size": 50
   },
+  "blueprint": {
+   "stack_size": 1
+  },
+  "blueprint-book": {
+   "stack_size": 1
+  },
   "boiler": {
    "stack_size": 50
   },
@@ -584,17 +619,38 @@
   "burner-mining-drill": {
    "stack_size": 50
   },
+  "cannon-shell": {
+   "stack_size": 200
+  },
+  "car": {
+   "stack_size": 1
+  },
+  "cargo-wagon": {
+   "stack_size": 5
+  },
   "centrifuge": {
    "stack_size": 50
   },
   "chemical-plant": {
    "stack_size": 10
   },
+  "chemical-science-pack": {
+   "stack_size": 200
+  },
+  "cliff-explosives": {
+   "stack_size": 20
+  },
+  "cluster-grenade": {
+   "stack_size": 100
+  },
   "coal": {
    "stack_size": 50
   },
   "coin": {
    "stack_size": 100000
+  },
+  "combat-shotgun": {
+   "stack_size": 5
   },
   "concrete": {
    "stack_size": 100
@@ -614,14 +670,47 @@
   "copper-plate": {
    "stack_size": 100
   },
+  "copy-paste-tool": {
+   "stack_size": 1
+  },
   "crude-oil-barrel": {
    "stack_size": 10
+  },
+  "cut-paste-tool": {
+   "stack_size": 1
   },
   "decider-combinator": {
    "stack_size": 50
   },
+  "deconstruction-planner": {
+   "stack_size": 1
+  },
+  "defender-capsule": {
+   "stack_size": 100
+  },
+  "destroyer-capsule": {
+   "stack_size": 100
+  },
   "discharge-defense-equipment": {
    "stack_size": 20
+  },
+  "discharge-defense-remote": {
+   "stack_size": 1
+  },
+  "distractor-capsule": {
+   "stack_size": 100
+  },
+  "dummy-steel-axe": {
+   "stack_size": 1
+  },
+  "effectivity-module": {
+   "stack_size": 50
+  },
+  "effectivity-module-2": {
+   "stack_size": 50
+  },
+  "effectivity-module-3": {
+   "stack_size": 50
   },
   "electric-energy-interface": {
    "stack_size": 50
@@ -652,6 +741,15 @@
   },
   "exoskeleton-equipment": {
    "stack_size": 20
+  },
+  "explosive-cannon-shell": {
+   "stack_size": 200
+  },
+  "explosive-rocket": {
+   "stack_size": 200
+  },
+  "explosive-uranium-cannon-shell": {
+   "stack_size": 200
   },
   "explosives": {
    "stack_size": 50
@@ -686,8 +784,20 @@
   "filter-inserter": {
    "stack_size": 50
   },
+  "firearm-magazine": {
+   "stack_size": 200
+  },
+  "flamethrower": {
+   "stack_size": 5
+  },
+  "flamethrower-ammo": {
+   "stack_size": 100
+  },
   "flamethrower-turret": {
    "stack_size": 50
+  },
+  "fluid-wagon": {
+   "stack_size": 5
   },
   "flying-robot-frame": {
    "stack_size": 50
@@ -700,6 +810,9 @@
   },
   "green-wire": {
    "stack_size": 200
+  },
+  "grenade": {
+   "stack_size": 100
   },
   "gun-turret": {
    "stack_size": 50
@@ -715,6 +828,9 @@
   },
   "heat-pipe": {
    "stack_size": 50
+  },
+  "heavy-armor": {
+   "stack_size": 1
   },
   "heavy-oil-barrel": {
    "stack_size": 10
@@ -746,6 +862,15 @@
   "item-unknown": {
    "stack_size": 1
   },
+  "item-with-inventory": {
+   "stack_size": 1
+  },
+  "item-with-label": {
+   "stack_size": 1
+  },
+  "item-with-tags": {
+   "stack_size": 1
+  },
   "lab": {
    "stack_size": 10
   },
@@ -758,6 +883,9 @@
   "laser-turret": {
    "stack_size": 50
   },
+  "light-armor": {
+   "stack_size": 1
+  },
   "light-oil-barrel": {
    "stack_size": 10
   },
@@ -769,6 +897,9 @@
   },
   "loader": {
    "stack_size": 50
+  },
+  "locomotive": {
+   "stack_size": 5
   },
   "logistic-chest-active-provider": {
    "stack_size": 50
@@ -788,6 +919,9 @@
   "logistic-robot": {
    "stack_size": 50
   },
+  "logistic-science-pack": {
+   "stack_size": 200
+  },
   "long-handed-inserter": {
    "stack_size": 50
   },
@@ -799,6 +933,12 @@
   },
   "medium-electric-pole": {
    "stack_size": 50
+  },
+  "military-science-pack": {
+   "stack_size": 200
+  },
+  "modular-armor": {
+   "stack_size": 1
   },
   "night-vision-equipment": {
    "stack_size": 20
@@ -827,11 +967,20 @@
   "petroleum-gas-barrel": {
    "stack_size": 10
   },
+  "piercing-rounds-magazine": {
+   "stack_size": 200
+  },
+  "piercing-shotgun-shell": {
+   "stack_size": 200
+  },
   "pipe": {
    "stack_size": 100
   },
   "pipe-to-ground": {
    "stack_size": 50
+  },
+  "pistol": {
+   "stack_size": 5
   },
   "plastic-bar": {
    "stack_size": 100
@@ -839,11 +988,32 @@
   "player-port": {
    "stack_size": 50
   },
+  "poison-capsule": {
+   "stack_size": 100
+  },
+  "power-armor": {
+   "stack_size": 1
+  },
+  "power-armor-mk2": {
+   "stack_size": 1
+  },
   "power-switch": {
    "stack_size": 50
   },
   "processing-unit": {
    "stack_size": 100
+  },
+  "production-science-pack": {
+   "stack_size": 200
+  },
+  "productivity-module": {
+   "stack_size": 50
+  },
+  "productivity-module-2": {
+   "stack_size": 50
+  },
+  "productivity-module-3": {
+   "stack_size": 50
   },
   "programmable-speaker": {
    "stack_size": 50
@@ -857,11 +1027,17 @@
   "radar": {
    "stack_size": 50
   },
+  "rail": {
+   "stack_size": 100
+  },
   "rail-chain-signal": {
    "stack_size": 50
   },
   "rail-signal": {
    "stack_size": 50
+  },
+  "raw-fish": {
+   "stack_size": 100
   },
   "red-wire": {
    "stack_size": 200
@@ -872,14 +1048,23 @@
   "refined-hazard-concrete": {
    "stack_size": 100
   },
+  "repair-pack": {
+   "stack_size": 100
+  },
   "roboport": {
    "stack_size": 10
+  },
+  "rocket": {
+   "stack_size": 200
   },
   "rocket-control-unit": {
    "stack_size": 10
   },
   "rocket-fuel": {
    "stack_size": 10
+  },
+  "rocket-launcher": {
+   "stack_size": 5
   },
   "rocket-part": {
    "stack_size": 5
@@ -890,11 +1075,23 @@
   "satellite": {
    "stack_size": 1
   },
+  "selection-tool": {
+   "stack_size": 1
+  },
+  "shotgun": {
+   "stack_size": 5
+  },
+  "shotgun-shell": {
+   "stack_size": 200
+  },
   "simple-entity-with-force": {
    "stack_size": 50
   },
   "simple-entity-with-owner": {
    "stack_size": 50
+  },
+  "slowdown-capsule": {
+   "stack_size": 100
   },
   "small-electric-pole": {
    "stack_size": 50
@@ -910,6 +1107,36 @@
   },
   "solid-fuel": {
    "stack_size": 50
+  },
+  "space-science-pack": {
+   "stack_size": 2000
+  },
+  "speed-module": {
+   "stack_size": 50
+  },
+  "speed-module-2": {
+   "stack_size": 50
+  },
+  "speed-module-3": {
+   "stack_size": 50
+  },
+  "spidertron": {
+   "stack_size": 1
+  },
+  "spidertron-remote": {
+   "stack_size": 1
+  },
+  "spidertron-rocket-launcher-1": {
+   "stack_size": 1
+  },
+  "spidertron-rocket-launcher-2": {
+   "stack_size": 1
+  },
+  "spidertron-rocket-launcher-3": {
+   "stack_size": 1
+  },
+  "spidertron-rocket-launcher-4": {
+   "stack_size": 1
   },
   "splitter": {
    "stack_size": 50
@@ -950,6 +1177,9 @@
   "storage-tank": {
    "stack_size": 50
   },
+  "submachine-gun": {
+   "stack_size": 5
+  },
   "substation": {
    "stack_size": 50
   },
@@ -958,6 +1188,18 @@
   },
   "sulfuric-acid-barrel": {
    "stack_size": 10
+  },
+  "tank": {
+   "stack_size": 1
+  },
+  "tank-cannon": {
+   "stack_size": 5
+  },
+  "tank-flamethrower": {
+   "stack_size": 1
+  },
+  "tank-machine-gun": {
+   "stack_size": 1
   },
   "train-stop": {
    "stack_size": 10
@@ -968,11 +1210,17 @@
   "underground-belt": {
    "stack_size": 50
   },
+  "upgrade-planner": {
+   "stack_size": 1
+  },
   "uranium-235": {
    "stack_size": 100
   },
   "uranium-238": {
    "stack_size": 100
+  },
+  "uranium-cannon-shell": {
+   "stack_size": 200
   },
   "uranium-fuel-cell": {
    "stack_size": 50
@@ -980,8 +1228,17 @@
   "uranium-ore": {
    "stack_size": 50
   },
+  "uranium-rounds-magazine": {
+   "stack_size": 200
+  },
   "used-up-uranium-fuel-cell": {
    "stack_size": 50
+  },
+  "utility-science-pack": {
+   "stack_size": 200
+  },
+  "vehicle-machine-gun": {
+   "stack_size": 1
   },
   "water-barrel": {
    "stack_size": 10
@@ -997,7 +1254,7 @@
   "factorio_version": "1.1",
   "note": "generated by factorio/tools/distill_data_raw.py; do not edit by hand",
   "sha256": "82040a20314d2aeefb5303d615f9e8c52461e265a90787db5e217e3ea7214775",
-  "source": "https://jackhugh.github.io/factorio-data-raw-visualiser/data.json"
+  "source": "https://jackhugh.github.io/factorio-data-raw-visualiser/data-raw.json"
  },
  "recipes": {
   "accumulator": {

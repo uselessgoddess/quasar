@@ -10,6 +10,7 @@ nothing mutates it.
 """
 
 import json
+import random
 
 import pytest
 
@@ -29,12 +30,16 @@ def corpus(tmp_path_factory):
 @pytest.fixture
 def document(tmp_path):
     """One generated document on disk, which is what most commands take."""
-    import random
-
     blueprint, spec = synth.GENERATORS["smelter-column"](random.Random(3), DATA)
     path = tmp_path / "design.txt"
     path.write_text(grammar.serialise(blueprint, DATA, spec))
     return path
+
+
+def _module(seed: int = 5) -> str:
+    """A module document: the only kind with machines to feed and an output."""
+    blueprint, spec = synth.GENERATORS["module"](random.Random(seed), DATA)
+    return grammar.serialise(blueprint, DATA, spec)
 
 
 # --- the parser ------------------------------------------------------------
@@ -73,7 +78,7 @@ def test_the_manifest_agrees_with_what_was_asked_for(corpus):
     # Every generator is held to a perfect score by its own tests, so a single
     # rejection here is a bug rather than an acceptable loss.
     assert manifest["rejected"] == 0
-    assert manifest["vocab_size"] == 495
+    assert manifest["vocab_size"] == 739
 
 
 def test_the_held_out_prompts_carry_what_a_grader_needs(corpus):
@@ -194,6 +199,37 @@ def test_grading_an_empty_file_says_so(tmp_path, capsys):
     assert "no samples" in capsys.readouterr().err
 
 
+def test_grading_can_be_narrowed_to_one_generator(document, tmp_path, capsys):
+    """How the run reports the task that is not already solved.
+
+    Averaged into the benchmark a module that delivers nothing moves `quality`
+    by a fortieth, because ten of the eleven generators come out legal from the
+    first checkpoint and there are far more of them.
+    """
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(
+        json.dumps({"kind": "smelter-column", "text": document.read_text()})
+        + "\n"
+        + json.dumps({"kind": "module", "text": _module()})
+        + "\n"
+    )
+    summary = tmp_path / "summary.json"
+
+    assert main(["grade", str(samples), "--kind", "module", "--json", str(summary)]) == 0
+
+    assert json.loads(summary.read_text())["samples"] == 1
+    # And under its own rule: a run grades the whole benchmark and then this,
+    # and two blocks headed `GRADE` are two blocks nobody can point at.
+    assert "GRADE MODULES" in capsys.readouterr().out
+
+
+def test_grading_a_kind_the_sampler_never_produced_says_which(document, tmp_path, capsys):
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(json.dumps({"text": document.read_text()}) + "\n")
+    assert main(["grade", str(samples), "--kind", "module"]) == 1
+    assert "no module samples" in capsys.readouterr().err
+
+
 def test_a_sampler_that_named_the_field_something_else_is_still_read(tmp_path):
     samples = tmp_path / "samples.jsonl"
     samples.write_text(json.dumps({"completion": "<bp> </bp>"}) + "\n")
@@ -255,6 +291,49 @@ def test_graded_checkpoints_add_panels_and_are_ordered_by_their_filenames(
 
     assert len(graded.read_bytes()) > len(plain.read_bytes())
     assert "graded checkpoints" in capsys.readouterr().out
+
+
+def test_the_module_slice_gets_a_flow_panel_of_its_own(document, tmp_path):
+    """`delivers`/`fed`/`working` over the module samples alone.
+
+    The chart the whole run is for: the legality metrics saturate in the first
+    few hundred steps, and averaged over a benchmark that is mostly belt lanes
+    so does everything else. `--kind ''` is the same sheet without the panel,
+    which is what makes this a test of the panel rather than of the board.
+    """
+    log = tmp_path / "train.log"
+    log.write_text(LOG)
+    files = []
+    for step in (100, 200):
+        path = tmp_path / f"samples-{step:06d}.jsonl"
+        path.write_text(
+            json.dumps({"kind": "smelter-column", "text": document.read_text()})
+            + "\n"
+            + json.dumps({"kind": "module", "text": _module(step)})
+            + "\n"
+        )
+        files.append(str(path))
+
+    with_panel, without = tmp_path / "module.png", tmp_path / "plain.png"
+    assert main(["plot", str(log), str(with_panel), "--grade", *files]) == 0
+    assert main(["plot", str(log), str(without), "--kind", "", "--grade", *files]) == 0
+
+    assert len(with_panel.read_bytes()) > len(without.read_bytes())
+
+
+def test_a_checkpoint_with_no_module_in_it_is_left_off_the_flow_panel(document, tmp_path):
+    """A model never asked for a module has not failed to build one, so the
+    curve skips that checkpoint instead of drawing it as a zero."""
+    log = tmp_path / "train.log"
+    log.write_text(LOG)
+    first = tmp_path / "samples-000100.jsonl"
+    first.write_text(json.dumps({"kind": "smelter-column", "text": document.read_text()}) + "\n")
+    second = tmp_path / "samples-000200.jsonl"
+    second.write_text(json.dumps({"kind": "module", "text": _module()}) + "\n")
+
+    out = tmp_path / "metrics.png"
+    assert main(["plot", str(log), str(out), "--grade", str(first), str(second)]) == 0
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_a_log_with_no_metrics_in_it_is_an_error(tmp_path, capsys):

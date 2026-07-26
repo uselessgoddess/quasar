@@ -28,8 +28,8 @@ steps=${STEPS:-}
 # that decides whether the run fits its budget, not the training length.
 prompts=${PROMPTS:-24}
 backend=${BACKEND:-}
-# Human blueprints, if a cache has been fetched — the generators saturate around
-# 6,300 layouts and the Chinchilla budget wants more than that. Absent, the run
+# Human blueprints, if a cache has been fetched — 20,000 weighted draws are
+# 14.1M tokens and the Chinchilla budget wants 71.4M. Absent, the run
 # is synthetic-only and everything else about it is unchanged, which is what
 # keeps this script runnable on a box with no network.
 #
@@ -121,6 +121,14 @@ last=$(ls "$out"/samples-*.jsonl | tail -1)
     --sheet "$out/sheet.png" --json "$out/grade.json" --columns 4
 "${harness[@]}" grade "$last" --sheet "$out/failures.png" --order worst >/dev/null
 
+# The module slice on its own, under its own `== GRADE MODULES ==` rule. The
+# benchmark average hides it: ten of the eleven generators come out legal from
+# the first checkpoint, so a module that delivers nothing moves `quality` by a
+# fortieth. `--kind` reads the field `generate` copied out of the prompt
+# record, so nothing here has to be matched back up to a spec by hand.
+"${harness[@]}" grade "$last" --kind module \
+    --sheet "$out/modules.png" --json "$out/grade-modules.json" --columns 4
+
 # One frame per checkpoint, same prompt in the same cell every time, so the
 # frames flip into a timelapse of the model learning to build:
 #
@@ -137,7 +145,13 @@ stage plot
 
 # The best generation, as a blueprint string. This is the whole point of the
 # exercise: something that can be pasted into the game.
-"$python" - "$last" "$out/best.txt" <<'PY'
+#
+# Twice, and the second one is the interesting one: ranked over the whole
+# mixture the winner is a belt lane often enough — dozens of samples tie at a
+# perfect score and the tie-break is entity count — that `best.png` need never
+# show the one task the run is about. `best-module.png` is the module the model
+# built best, whatever the rest of the benchmark did.
+"$python" - "$last" "$out/best.txt" "$out/best-module.txt" <<'PY'
 import json
 import pathlib
 import sys
@@ -150,22 +164,34 @@ samples = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().sp
 
 
 def rank(sample):
-    # Quality first, entity count second. A good run has a dozen generations
-    # scoring a flat 1.0, and picking whichever of them came first would put a
-    # six-entity mall cell forward when a 68-entity bus tap scored the same.
+    # Flow first, then quality, then entity count. Quality alone was the whole
+    # ranking until the run analysed in docs/FACTORIO.md finished with a dozen
+    # generations at a flat 1.0 -- at which point the tie-break is doing all the
+    # work and "best" means "biggest". Flow asks whether the thing would make
+    # anything, which is a question the ceiling has not been reached on.
     report = validate.grade(sample["text"], data)
-    return report.quality(), report.entities
+    return report.flows(), report.quality(), report.entities
 
 
 ranked = sorted(samples, key=rank, reverse=True)
 pathlib.Path(sys.argv[2]).write_text(ranked[0]["text"] if ranked else "")
+
+# Same ranking, over the module generations alone. `kind` is on the sample
+# because `generate` copies the prompt record into it.
+modules = [sample for sample in ranked if sample.get("kind") == "module"]
+pathlib.Path(sys.argv[3]).write_text(modules[0]["text"] if modules else "")
 PY
 "${harness[@]}" render "$out/best.txt" "$out/best.png" || true
 "${harness[@]}" export "$out/best.txt" >"$out/best.blueprint" || true
+# `|| true` here is load-bearing rather than defensive: a run whose prompts held
+# no module, or whose best module does not parse, leaves an empty file behind.
+"${harness[@]}" render "$out/best-module.txt" "$out/best-module.png" || true
+"${harness[@]}" export "$out/best-module.txt" >"$out/best-module.blueprint" || true
 
 echo
 timings[-1]="${timings[-1]}$((SECONDS - started))s"
 printf '%s\n' "${timings[@]}"
 printf '%-24s%ss\n' total "$SECONDS"
 echo
-echo "artifacts in $out: metrics.png sheet.png failures.png corpus.png best.png frames/"
+echo "artifacts in $out: metrics.png sheet.png modules.png failures.png corpus.png"
+echo "                best.png best-module.png frames/"

@@ -102,8 +102,27 @@ def test_prompts_are_held_out_and_replayable(corpus):
     trained = {encoder.decode(ids) for ids in shards.documents(tokens, meta.eos)}
     for entry in prompts:
         assert entry["reference"] not in trained
-        assert entry["prompt"] == grammar.prompt(grammar.Spec(**entry["spec"]))
+        # Through the JSON and back: a spec whose ports survive as plain dicts
+        # would produce a prompt with no ports in it, which is a different task
+        # than the one the reference answers.
+        assert entry["prompt"] == grammar.prompt(grammar.Spec.from_dict(entry["spec"]))
         assert entry["reference"].startswith(entry["prompt"])
+
+
+def test_the_first_prompts_are_one_of_each_kind_rather_than_a_slice_of_the_mixture(tmp_path):
+    """What a caller taking a prefix gets, which is every caller there is.
+
+    Sampling is the expensive half of a run, so `examples/factorio.sh` grades
+    the first two dozen prompts and nothing else. In stream order those two
+    dozen are a sample of the mixture — mostly belt lanes and assembler rows,
+    the kinds whose metrics already read 1.000 — and the module prompts, the
+    only ones that ask whether items can reach a machine, would be a couple of
+    entries at best.
+    """
+    out = tmp_path / "corpus"
+    dataset.build(out, 400, seed=5, variants=2, valid_every=6, prompts=8, data=DATA)
+    kinds = [entry["kind"] for entry in dataset.read_prompts(out / "prompts.jsonl")]
+    assert len(kinds) == len(set(kinds))
 
 
 def test_a_smaller_corpus_is_a_prefix_of_a_larger_one():

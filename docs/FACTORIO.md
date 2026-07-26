@@ -431,6 +431,11 @@ PYTHONPATH=src python3 experiments/saturation.py
 
 # во что обходится сборка корпуса и где у неё горячие точки
 PYTHONPATH=src python3 experiments/corpus_cost.py 400
+
+# та же сборка, но одной ревизии против другой
+cd .. && git worktree add --detach /tmp/wt-main upstream/main
+factorio/experiments/corpus_ab.sh /tmp/wt-main main
+factorio/experiments/corpus_ab.sh . branch
 ```
 
 Прогон из §5.5 целиком — полчаса на 16 GB, ровно то, что гоняет CI:

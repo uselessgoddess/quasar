@@ -331,7 +331,7 @@ PYTHONPATH=src python3 experiments/module_yield.py 1600
 # работают ли модули, которые он рисует
 PYTHONPATH=src python3 experiments/module_flow.py 60
 
-# где кончаются старые генераторы
+# где кончаются генераторы
 PYTHONPATH=src python3 experiments/saturation.py
 
 # во что обходится сборка корпуса и где у неё горячие точки

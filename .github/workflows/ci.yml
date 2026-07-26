@@ -111,7 +111,7 @@ jobs:
             runs/nano/*.json
             runs/nano/*.jsonl
             runs/nano/*.log
-            runs/nano/best.blueprint
+            runs/nano/*.blueprint
             runs/nano/frames/*.png
 
   # Synchronized stepwise kernel A/B plus the production optimizer step on the

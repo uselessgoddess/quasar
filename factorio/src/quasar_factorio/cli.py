@@ -250,6 +250,29 @@ def _grade(args) -> int:
         _bar(name, value, f"{value:.3f}")
     _rows([("mean entities", f"{summary.mean_entities:.1f}")])
 
+    # Reported apart from the block above because it answers a different
+    # question. Everything above is legality; this is whether items move.
+    _rule("ITEM FLOW", f"{summary.ported} of {summary.samples} declared ports")
+    flow_rows = [
+        ("machines fed", summary.mean_fed),
+        ("machines working", summary.mean_working),
+        ("flow score", summary.mean_flow),
+    ]
+    if summary.ported:
+        flow_rows = [
+            ("outputs delivered", summary.mean_delivers),
+            *flow_rows,
+            ("inside the zone", summary.zone_rate),
+        ]
+    for name, value in flow_rows:
+        _bar(name, value, f"{value:.3f}")
+    _rows(
+        [
+            ("designs leaking items", f"{summary.leak_rate:.3f}"),
+            ("belts over two items", f"{summary.mixed_rate:.3f}"),
+        ]
+    )
+
     if summary.errors:
         _rule("WHY IT FAILED")
         worst = max(summary.errors.values())
@@ -296,11 +319,16 @@ def _plot(args) -> int:
 
 def _grade_panels(graded: Sequence[tuple[float, validate.Summary]]) -> list[render.Raster]:
     """Grader panels: the verdict now, and — with more than one file — over time."""
+    # `flow` last and deliberately in the same panel as the rest: the point of
+    # the analysis this came out of is that the legality metrics saturate while
+    # the flow metric still has somewhere to go, and putting them on separate
+    # charts would hide exactly that comparison.
     metrics = (
         ("valid", plots.INKS[3], lambda s: s.valid_rate),
         ("parses", plots.INKS[0], lambda s: s.parse_rate),
         ("spec", plots.INKS[2], lambda s: s.spec_rate),
         ("quality", plots.INKS[1], lambda s: s.mean_quality),
+        ("flow", plots.INKS[5], lambda s: s.mean_flow),
     )
     step, last = graded[-1]
     panels = [
@@ -473,7 +501,12 @@ def _sheet(out, reports, data, *, columns: int, order: str) -> None:
 
 
 def _caption(report: validate.Report) -> list[str]:
-    """Two lines of grader verdict, which is all a card has room for."""
+    """Up to three lines of grader verdict, which is all a card has room for.
+
+    The third line only appears for a design that declared ports, and it says
+    the one thing a reader cannot see by looking at the picture: whether the
+    item the module promised actually comes out of it.
+    """
     if not report.parsed:
         return [f"PARSE FAIL AT {report.error_at}", report.error[:38].upper()]
     head = "VALID" if report.valid else "INVALID"
@@ -483,11 +516,15 @@ def _caption(report: validate.Report) -> list[str]:
         head += " OFF GRID"
     elif report.illegal_recipes:
         head += f" BAD RECIPE {report.illegal_recipes}"
-    return [
+    lines = [
         f"{head}  {report.entities} ENT  {report.width}X{report.height}",
         f"PWR {report.powered:.2f}  INS {report.connected_inserters:.2f}"
         f"  BLT {report.belts_lead_somewhere:.2f}",
     ]
+    if report.ported:
+        starved = f" MISSING {report.missing[0][:14].upper()}" if report.missing else ""
+        lines.append(f"OUT {report.delivers:.2f}  FED {report.fed:.2f}{starved}")
+    return lines
 
 
 def _read(path: pathlib.Path) -> str:

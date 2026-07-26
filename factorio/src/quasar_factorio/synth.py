@@ -690,8 +690,14 @@ MODULE_POLE = "medium-electric-pole"
 
 @functools.cache
 def _module_targets(data: Data) -> tuple[planner.Module, ...]:
-    """Every product a stacked-band module can make, with what it is handed."""
-    return planner.modules(data)
+    """Every product a stacked-band module can make, with what it is handed.
+
+    Filtered by shape rather than taking the catalogue whole: `plan.modules` also
+    offers forks, and this builder stacks. Drawing one here would emit a layout
+    where the last machine is fed by the row above and starves for the branch
+    that is not there.
+    """
+    return tuple(module for module in planner.modules(data) if module.shape == "stack")
 
 
 @dataclass(frozen=True)

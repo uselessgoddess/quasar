@@ -114,7 +114,20 @@ def test_the_module_catalogue_is_not_empty_and_leads_with_the_flagship():
     assert plan.Module("electronic-circuit", ("iron-plate", "copper-plate"), 2) in catalogue
 
 
-def test_every_catalogued_module_survives_its_own_four_filters():
+def banded(unit, stages):
+    """The one condition both layouts are built on, restated for the tests.
+
+    A column of bands: every stage fed by the supply and by the stage just above
+    it, and no belt carrying more than the two lanes a transport belt has.
+    """
+    reachable = set(unit.supply)
+    for rank, stage in enumerate(stages):
+        assert set(stage.ingredients) <= reachable, stage.recipe
+        assert len(unit.raws_of(stage)) + bool(rank) <= 2, stage.recipe
+        reachable = set(unit.supply) | {stage.product}
+
+
+def test_every_catalogued_module_survives_its_own_filters():
     for module in plan.modules(DATA):
         unit = plan.solve(DATA, module.product, module.supply, rate=1e-9, depth=module.depth)
         # Two stages or more: one machine on a belt is not a module.
@@ -122,14 +135,66 @@ def test_every_catalogued_module_survives_its_own_four_filters():
         # Every machine can be told what to make. A furnace cannot, so a chain
         # through one would be a blueprint the grammar has no way to express.
         assert all(DATA.entities[stage.machine].takes_recipe for stage in unit.stages), module
-        # At most two items on any belt: a transport belt has two lanes.
-        for rank, stage in enumerate(unit.stages):
-            assert len(unit.raws_of(stage)) + bool(rank) <= 2, module
-        # Linear: each stage is fed by the supply and by the stage just above.
+        if module.shape == "stack":
+            assert plan.fork(unit) is None, module
+            banded(unit, unit.stages)
+        else:
+            # A fork is two columns of bands and a machine that takes both.
+            left, right = plan.fork(unit)
+            assert module.shape == "fork", module
+            banded(unit, left)
+            banded(unit, right)
+            assert set(unit.stages[-1].ingredients) == {left[-1].product, right[-1].product}
+            assert unit.raws_of(unit.stages[-1]) == ()
+
+
+def test_the_catalogue_holds_at_least_five_branching_chains():
+    """The point of forks: chains the stacked layout could not express at all.
+
+    Every one of these has a last machine wanting two things that both have to
+    be made, which is precisely what a run of bands cannot deliver — the first
+    of the two would sail past the row that wants it.
+    """
+    forks = [module for module in plan.modules(DATA, depth=4) if module.shape == "fork"]
+    assert len(forks) >= 5
+    assert {module.product for module in forks} >= {"boiler", "repair-pack"}
+    for module in forks:
+        unit = plan.solve(DATA, module.product, module.supply, rate=1e-9, depth=module.depth)
+        # Not linear, or the stacked layout would have claimed it first.
         reachable = set(unit.supply)
+        linear = True
         for stage in unit.stages:
-            assert set(stage.ingredients) <= reachable, module
+            linear = linear and set(stage.ingredients) <= reachable
             reachable = set(unit.supply) | {stage.product}
+        assert not linear, module
+
+
+def test_green_science_is_still_a_factory_and_for_two_reasons():
+    """The honest limit, stated as a test so it cannot be lost by accident.
+
+    Green science is the chain everyone reaches for, and a fork is exactly the
+    right shape for its last machine: an inserter and a transport belt, both
+    made, into a lab pack. It is still refused, twice over. The gear stage feeds
+    both branches, so they are not two independent columns but a diamond; and
+    the inserter wants circuits, gears *and* iron plate, which is three item
+    types on a belt that has two lanes. Neither is fixed by branching — the
+    first needs a shared intermediate routed sideways, the second needs a second
+    belt per machine — so `logistic-science-pack` stays out of the catalogue
+    rather than going in as a layout that starves.
+    """
+    unit = plan.solve(DATA, "logistic-science-pack", PLATES, rate=1e-9, depth=4)
+    final, inserter = unit.stages[-1], unit.stages[-3]
+    assert set(final.ingredients) == {"inserter", "transport-belt"}
+    assert unit.raws_of(final) == ()  # the convergence belt itself is fine
+    assert len(set(inserter.ingredients)) == 3  # the belt above the inserter is not
+    assert plan.fork(unit) is None
+    assert "logistic-science-pack" not in {module.product for module in plan.modules(DATA, depth=4)}
+
+
+def test_one_lane_is_not_enough_for_any_fork():
+    """Two branch products are two item types, so a one-lane belt has no fork."""
+    for module in plan.modules(DATA, lanes=1):
+        assert module.shape == "stack", module
 
 
 def test_a_catalogued_supply_never_names_an_item_no_stage_consumes():
@@ -157,7 +222,11 @@ def test_depth_travels_with_the_module_because_it_changes_what_gets_built():
     assert {module.depth for module in catalogue} > {2}
     for module in catalogue:
         unit = plan.solve(DATA, module.product, module.supply, rate=1e-9, depth=module.depth)
-        assert len(unit.stages) <= module.depth
+        # Depth bounds the longest path to the supply, not the stage count: a
+        # fork's two branches are the same distance down and are counted once.
+        split = plan.fork(unit)
+        longest = max(len(side) for side in split) + 1 if split else len(unit.stages)
+        assert longest <= module.depth
         # The pair is unique: two entries never disagree about how deep they are.
         twins = [
             other

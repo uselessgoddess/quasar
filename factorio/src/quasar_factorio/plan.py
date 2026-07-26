@@ -318,11 +318,19 @@ class Module:
     that makes its own gears. Solving the second at the first's depth raises, and
     solving the first at the second's depth silently returns the first, so a
     caller that drops this field draws targets it cannot build.
+
+    `shape` says which layout the chain is for: `"stack"` is the run of bands
+    that each hand their product to the row below, `"fork"` is two such runs side
+    by side converging on a last machine that consumes both. It is defaulted
+    because a stacked module is what the catalogue was before forks existed and
+    the pair-plus-depth remains its identity; the shape is derived from the plan
+    rather than chosen, so it never contradicts the stages `solve` returns.
     """
 
     product: str
     supply: tuple[str, ...]
     depth: int
+    shape: str = "stack"
 
 
 def modules(
@@ -331,23 +339,33 @@ def modules(
     depth: int = 3,
     lanes: int = 2,
 ) -> tuple[Module, ...]:
-    """The chains a stacked-band module layout can actually build, and from what.
+    """The chains a module layout can actually build, and from what.
 
-    Four filters, each of them a property of the layout rather than of the
-    recipe: every stage must run in a machine that has a recipe slot (a furnace
-    does not), the chain must be at least two stages long (one stage is an
-    assembler row, which the corpus already has), each stage's shared belt must
-    carry no more than `lanes` item types, and the chain must be *linear*.
+    Three filters and a shape. The filters are properties of the layout rather
+    than of the recipe: every stage must run in a machine that has a recipe slot
+    (a furnace does not), the chain must be at least two stages long (one stage
+    is an assembler row, which the corpus already has), and no belt may carry
+    more than `lanes` item types. The shape is which of the two module layouts
+    can express the plan, and a chain neither of them fits is dropped.
 
-    Linear is the sharp one. A stacked-band layout hands a stage's product to
-    the row immediately below it and nowhere else, so a chain where stage one's
-    product is wanted again three stages down cannot be built by stacking:
-    `fast-underground-belt` needs both gears and yellow undergrounds, and the
-    gears would sail past the underground row with nothing to take them off. The
-    grader in `flow` catches exactly this — `fed` at 0.67, the last stage
-    starved — which is how the condition was found rather than guessed. Routing
-    an intermediate down past a stage is a real layout and a later generator can
-    have it; declaring it out of scope here is what keeps the corpus honest.
+    *Stack* is a run of bands: each stage's belt carries what arrives from
+    outside plus the product of the stage immediately above, and nothing else.
+    That is the sharp condition, because a stacked band hands its product down
+    one row and nowhere else — `fast-underground-belt` needs both gears and
+    yellow undergrounds, and the gears would sail past the underground row with
+    nothing to take them off. The grader in `flow` catches exactly this — `fed`
+    at 0.67, the last stage starved — which is how the condition was found
+    rather than guessed.
+
+    *Fork* is the answer to that, for the case where the two wanted
+    intermediates are made rather than delivered: two stacks side by side, each
+    linear in its own right, both dropping onto one belt that the last machine
+    picks up from. It buys the branching chains — a boiler from stone furnaces
+    and pipes, a repair pack from circuits and gears — at the price of a
+    convergence belt that is full: two branch products are already `lanes` item
+    types, so the last stage may consume those two and nothing else. A chain
+    that additionally wants a raw item at the bottom (green science, which asks
+    for inserters, belts *and* iron plate) is still a factory here, not a module.
 
     Every boundary from two stages up to `depth` is offered, because they are
     different modules and not different qualities of the same one: a player who
@@ -366,16 +384,43 @@ def modules(
                 continue
             if any(not data.entities[stage.machine].takes_recipe for stage in unit.stages):
                 continue
-            if any(
-                len(unit.raws_of(stage)) + bool(rank) > lanes
-                for rank, stage in enumerate(unit.stages)
-            ):
-                continue
-            if not _linear(unit):
+            shape = _shape(unit, lanes)
+            if shape is None:
                 continue
             used = _used(unit)
-            out.setdefault((product, used), Module(product, used, level))
+            out.setdefault((product, used), Module(product, used, level, shape))
     return tuple(out.values())
+
+
+def fork(unit: Plan, lanes: int = 2) -> tuple[tuple[Stage, ...], tuple[Stage, ...]] | None:
+    """The plan split into two branches converging on its last stage, or `None`.
+
+    A plan forks when its last stage consumes exactly two items, both of them
+    made by earlier stages, and those earlier stages fall into two disjoint runs
+    that each stack on their own. The two runs come back in the plan's own order,
+    which is a topological one, so a layout can place each branch as a column of
+    bands and be sure a stage is never drawn above something it consumes.
+
+    The last stage is deliberately not returned: it is `unit.stages[-1]`, it is
+    always the whole of the third part, and returning it would invite a caller to
+    treat the three pieces as interchangeable when only the two branches are.
+    """
+    stages = unit.stages
+    if len(stages) < 3 or lanes < 2:
+        return None
+    made = {stage.product: stage for stage in stages[:-1]}
+    heads = tuple(dict.fromkeys(stages[-1].ingredients))
+    # Exactly two, both made here: one made item is a stack, three would not fit
+    # on the convergence belt, and a raw item among them would need a lane the
+    # two branch products have already taken.
+    if len(heads) != 2 or any(item not in made for item in heads):
+        return None
+    left, right = (_ancestry(stages[:-1], head, made) for head in heads)
+    if len(left) + len(right) != len(stages) - 1 or set(left) & set(right):
+        return None
+    if not (_banded(unit, left, lanes) and _banded(unit, right, lanes)):
+        return None
+    return left, right
 
 
 def _used(unit: Plan) -> tuple[str, ...]:
@@ -393,14 +438,53 @@ def _used(unit: Plan) -> tuple[str, ...]:
     return tuple(item for item in unit.supply if item in wanted)
 
 
-def _linear(unit: Plan) -> bool:
-    """Whether every stage is fed by the supply and by the stage just above it."""
+def _shape(unit: Plan, lanes: int) -> str | None:
+    """Which module layout can express this plan, or `None` if neither can.
+
+    The two are mutually exclusive rather than merely tried in order: a stack
+    reaches its last stage with one made item in hand, a fork with two, so no
+    plan is both.
+    """
+    if _banded(unit, unit.stages, lanes):
+        return "stack"
+    if fork(unit, lanes) is not None:
+        return "fork"
+    return None
+
+
+def _banded(unit: Plan, stages: tuple[Stage, ...], lanes: int) -> bool:
+    """Whether `stages` can be one column of bands: linear, and `lanes` per belt.
+
+    The belt above a band carries what the stage takes from outside the module,
+    plus — for every band but the first — the product of the band above it. Both
+    conditions are checked here because they are the same condition seen twice:
+    a stage fed by something other than the supply and the row above has no belt
+    to be fed from, and a stage fed by too many things has no room on the one it
+    has.
+    """
     reachable = set(unit.supply)
-    for stage in unit.stages:
+    for rank, stage in enumerate(stages):
         if not set(stage.ingredients) <= reachable:
+            return False
+        if len(unit.raws_of(stage)) + bool(rank) > lanes:
             return False
         reachable = set(unit.supply) | {stage.product}
     return True
+
+
+def _ancestry(stages: tuple[Stage, ...], head: str, made: dict[str, Stage]) -> tuple[Stage, ...]:
+    """The stages that `head` is built out of, `head` included, in plan order."""
+    wanted = {head}
+    frontier = [head]
+    while frontier:
+        stage = made.get(frontier.pop())
+        if stage is None:
+            continue
+        for item in stage.ingredients:
+            if item in made and item not in wanted:
+                wanted.add(item)
+                frontier.append(item)
+    return tuple(stage for stage in stages if stage.product in wanted)
 
 
 def _leaves(data: Data, item: str, depth: int) -> tuple[str, ...] | None:

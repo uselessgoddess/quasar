@@ -31,6 +31,7 @@ import pathlib
 import random
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
+from itertools import zip_longest
 
 from . import augment, grammar, shards, synth, tokenizer, validate
 from .blueprint import Blueprint
@@ -194,9 +195,24 @@ def _write_prompts(path: pathlib.Path, held: list[Design], data: Data, limit: in
     prompt asks the model to build something new, not to recall something it
     has already written down. The reference document rides along so the
     renderer can put the two side by side.
+
+    Round-robin over kinds rather than in stream order. Callers take a prefix —
+    `examples/factorio.sh` samples the first two dozen, because generation is
+    the expensive half of the run — and in stream order a prefix is a sample of
+    the *mixture*, which is nine parts belt lane and assembler row. The metric
+    that still has somewhere to go is item flow, and item flow is a question
+    only the module prompts ask, so a prefix that mirrors the mixture spends its
+    budget on the part of the benchmark that already reads 1.000.
     """
+    by_kind: dict[str, list[Design]] = {}
+    for design in held:
+        by_kind.setdefault(design.kind, []).append(design)
+    ordered = []
+    for row in zip_longest(*by_kind.values()):
+        ordered.extend(design for design in row if design is not None)
+
     lines = []
-    for design in held[:limit]:
+    for design in ordered[:limit]:
         lines.append(
             json.dumps(
                 {

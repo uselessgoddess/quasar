@@ -2,7 +2,9 @@
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm, RmsNormConfig};
 use burn::prelude::*;
+use burn::tensor::FloatDType;
 use burn::tensor::activation::log_softmax;
+use burn::tensor::module::linear;
 
 use crate::config;
 use crate::model::{Block, init};
@@ -17,6 +19,10 @@ pub struct Quasar {
     /// transposed into the head at every forward.
     head: Option<Linear>,
     z_loss: f64,
+    /// Optional compute dtype for the output projection only. Parameters,
+    /// optimizer state, normalized hidden states, logits and loss stay fp32.
+    #[module(skip)]
+    head_dtype: Option<FloatDType>,
 }
 
 impl Quasar {
@@ -29,6 +35,25 @@ impl Quasar {
     /// `ssd_mode` changes only which mathematically equivalent burn-mamba
     /// backward implementation runs; it does not change parameters or records.
     pub fn new_with_ssd(cfg: &config::Model, ssd_mode: config::SsdMode, device: &Device) -> Self {
+        Self::new_with_ssd_and_head_dtype(cfg, ssd_mode, None, device)
+    }
+
+    /// Build an experiment that casts only the output-head GEMM.
+    pub fn new_with_head_dtype(
+        cfg: &config::Model,
+        head_dtype: FloatDType,
+        device: &Device,
+    ) -> Self {
+        Self::new_with_ssd_and_head_dtype(cfg, config::SsdMode::default(), Some(head_dtype), device)
+    }
+
+    /// Build with independent SSD and output-head execution choices.
+    pub fn new_with_ssd_and_head_dtype(
+        cfg: &config::Model,
+        ssd_mode: config::SsdMode,
+        head_dtype: Option<FloatDType>,
+        device: &Device,
+    ) -> Self {
         cfg.validate().expect("model config is invalid");
         Self {
             embed: EmbeddingConfig::new(cfg.vocab_size, cfg.d_model)
@@ -45,22 +70,108 @@ impl Quasar {
                     .init(device)
             }),
             z_loss: cfg.z_loss,
+            head_dtype,
         }
     }
 
     /// `[batch, seq] -> [batch, seq, vocab]`.
     pub fn forward(&self, tokens: Tensor<2, Int>) -> Tensor<3> {
+        self.project(self.hidden(tokens))
+    }
+
+    fn hidden(&self, tokens: Tensor<2, Int>) -> Tensor<3> {
         let x = self.blocks.iter().fold(self.embed.forward(tokens), |x, b| b.forward(x));
-        let x = self.norm.forward(x);
-        match &self.head {
-            Some(head) => head.forward(x),
-            None => x.matmul(self.embed.weight.val().transpose().unsqueeze()),
+        self.norm.forward(x)
+    }
+
+    fn project(&self, x: Tensor<3>) -> Tensor<3> {
+        match self.head_dtype {
+            Some(dtype) => match &self.head {
+                Some(head) => linear(
+                    x.cast(dtype),
+                    head.weight.val().cast(dtype),
+                    head.bias.as_ref().map(|bias| bias.val().cast(dtype)),
+                )
+                .cast(FloatDType::F32),
+                None => tied_head(x, self.embed.weight.val(), Some(dtype)),
+            },
+            None => match &self.head {
+                Some(head) => head.forward(x),
+                None => tied_head(x, self.embed.weight.val(), None),
+            },
+        }
+    }
+
+    /// One untimed forward/backward diagnostic for a precision experiment.
+    ///
+    /// Reductions intentionally synchronize the device, so callers must keep
+    /// this outside any throughput measurement.
+    pub fn precision_diagnostics(
+        &self,
+        tokens: Tensor<2, Int>,
+        targets: Tensor<2, Int>,
+    ) -> PrecisionDiagnostics {
+        let hidden = self.hidden(tokens);
+        let activation = match self.head_dtype {
+            Some(dtype) => hidden.clone().detach().cast(dtype).cast(FloatDType::F32),
+            None => hidden.clone().detach(),
+        };
+        let activation_min = activation.clone().min().into_scalar::<f32>();
+        let activation_max = activation.clone().max().into_scalar::<f32>();
+        let activation_mean = activation.clone().mean().into_scalar::<f32>();
+        let activation_nonfinite = nonfinite_count(activation);
+
+        let logits = self.project(hidden);
+        let logits_nonfinite = nonfinite_count(logits.clone().detach());
+        let loss = Loss::new(logits, targets, self.z_loss);
+        let total = loss.total.clone().detach().into_scalar::<f32>();
+        let grads = loss.total.backward();
+        let embedding_grad =
+            self.embed.weight.val().grad(&grads).expect("embedding must receive a gradient");
+        let grad_norm =
+            (embedding_grad.clone() * embedding_grad.clone()).sum().sqrt().into_scalar::<f32>();
+        let gradient_nonfinite = nonfinite_count(embedding_grad);
+
+        PrecisionDiagnostics {
+            activation_min,
+            activation_max,
+            activation_mean,
+            grad_norm,
+            loss_scale: 1.0,
+            nonfinite_count: activation_nonfinite + logits_nonfinite + gradient_nonfinite,
+            loss: total,
         }
     }
 
     /// Next-token loss over every position.
     pub fn loss(&self, tokens: Tensor<2, Int>, targets: Tensor<2, Int>) -> Loss {
         Loss::new(self.forward(tokens), targets, self.z_loss)
+    }
+}
+
+/// Scalars required by the precision quality gate.
+#[derive(Clone, Copy, Debug)]
+pub struct PrecisionDiagnostics {
+    pub activation_min: f32,
+    pub activation_max: f32,
+    pub activation_mean: f32,
+    pub grad_norm: f32,
+    pub loss_scale: f32,
+    pub nonfinite_count: usize,
+    pub loss: f32,
+}
+
+fn nonfinite_count<const D: usize>(tensor: Tensor<D>) -> usize {
+    tensor.is_finite().bool_not().int().sum().into_scalar::<i64>() as usize
+}
+
+fn tied_head(hidden: Tensor<3>, embedding: Tensor<2>, dtype: Option<FloatDType>) -> Tensor<3> {
+    match dtype {
+        Some(dtype) => hidden
+            .cast(dtype)
+            .matmul(embedding.cast(dtype).transpose().unsqueeze())
+            .cast(FloatDType::F32),
+        None => hidden.matmul(embedding.transpose().unsqueeze()),
     }
 }
 
@@ -114,6 +225,52 @@ mod tests {
 
         assert_eq!(tied.forward(tokens.clone()).dims(), [2, 8, cfg.vocab_size]);
         assert_eq!(untied.forward(tokens).dims(), [2, 8, cfg.vocab_size]);
+    }
+
+    #[test]
+    fn bf16_tied_head_keeps_fp32_masters_and_logits() {
+        let cfg = config::Model::toy().with_tied_embeddings(true);
+        let device = Device::default().autodiff();
+        let reference = Quasar::new(&cfg, &device);
+        let mixed = Quasar::new_with_head_dtype(&cfg, FloatDType::BF16, &device)
+            .load_record(reference.clone().into_record());
+        let tokens = Tensor::<2, Int>::zeros([2, 8], &device);
+        assert_eq!(mixed.head_dtype, Some(FloatDType::BF16));
+        assert_eq!(mixed.embed.weight.val().dtype(), FloatDType::F32.into());
+
+        let mixed_logits = mixed.forward(tokens);
+        assert_eq!(mixed_logits.dtype(), FloatDType::F32.into());
+    }
+
+    #[test]
+    fn bf16_tied_head_matches_fp32_values_and_gradients_to_one_e_minus_two() {
+        let device = Device::default().autodiff();
+        let hidden_values: Vec<f32> = (0..32).map(|i| ((i % 13) as f32 - 6.0) / 7.0).collect();
+        let embedding_values: Vec<f32> = (0..128).map(|i| ((i % 17) as f32 - 8.0) / 11.0).collect();
+        let hidden_data = TensorData::new(hidden_values, [1, 4, 8]);
+        let embedding_data = TensorData::new(embedding_values, [16, 8]);
+
+        let reference_hidden = Tensor::<3>::from_data(hidden_data.clone(), &device).require_grad();
+        let reference_embedding =
+            Tensor::<2>::from_data(embedding_data.clone(), &device).require_grad();
+        let mixed_hidden = Tensor::<3>::from_data(hidden_data, &device).require_grad();
+        let mixed_embedding = Tensor::<2>::from_data(embedding_data, &device).require_grad();
+
+        let reference_logits = tied_head(reference_hidden, reference_embedding.clone(), None);
+        let mixed_logits = tied_head(mixed_hidden, mixed_embedding.clone(), Some(FloatDType::BF16));
+        let logits_error =
+            (reference_logits.clone() - mixed_logits.clone()).abs().max().into_scalar::<f32>();
+
+        let reference_grads = reference_logits.powi_scalar(2).mean().backward();
+        let mixed_grads = mixed_logits.powi_scalar(2).mean().backward();
+        let reference_grad =
+            reference_embedding.grad(&reference_grads).expect("reference embedding grad");
+        let mixed_grad = mixed_embedding.grad(&mixed_grads).expect("mixed embedding grad");
+        let grad_error = (reference_grad - mixed_grad).abs().max().into_scalar::<f32>();
+
+        assert!(logits_error > 0.0, "the reduced-precision seam was not exercised");
+        assert!(logits_error < 1e-2, "maximum logits error {logits_error}");
+        assert!(grad_error < 1e-2, "maximum embedding gradient error {grad_error}");
     }
 
     #[test]

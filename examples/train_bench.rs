@@ -36,12 +36,20 @@ struct Args {
     max_steps: usize,
     #[arg(long, value_enum, default_value_t = Dtype::F32)]
     dtype: Dtype,
+    /// Explicit compute dtype for the output-head GEMM; everything else stays
+    /// in the device dtype (fp32 in the paired precision experiment).
+    #[arg(long, value_enum)]
+    head_dtype: Option<HeadDtype>,
     #[arg(long, value_enum, default_value_t = Ssd::Serial)]
     ssd: Ssd,
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     checkpointing: bool,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     muon: bool,
+    /// Run one synchronized precision diagnostic before warm-up. This is never
+    /// included in a measured step.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    precision_diagnostics: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -54,6 +62,12 @@ enum Ssd {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Dtype {
     F32,
+    F16,
+    Bf16,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum HeadDtype {
     F16,
     Bf16,
 }
@@ -89,6 +103,15 @@ impl From<Dtype> for FloatDType {
     }
 }
 
+impl From<HeadDtype> for FloatDType {
+    fn from(value: HeadDtype) -> Self {
+        match value {
+            HeadDtype::F16 => Self::F16,
+            HeadDtype::Bf16 => Self::BF16,
+        }
+    }
+}
+
 impl From<Ssd> for SsdMode {
     fn from(value: Ssd) -> Self {
         match value {
@@ -114,7 +137,12 @@ fn main() -> Result<()> {
     device.seed(1337);
 
     let ssd_mode = SsdMode::from(args.ssd);
-    let mut model = Quasar::new_with_ssd(&cfg, ssd_mode.clone(), &device);
+    let mut model = Quasar::new_with_ssd_and_head_dtype(
+        &cfg,
+        ssd_mode.clone(),
+        args.head_dtype.map(FloatDType::from),
+        &device,
+    );
     let run = Run::new()
         .with_micro_batch(args.micro_batch)
         .with_accum(args.accum)
@@ -126,15 +154,35 @@ fn main() -> Result<()> {
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
 
     println!(
-        "bench device={base_device:?} model={:?} dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
+        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
         args.model,
         args.dtype,
+        args.head_dtype,
         args.micro_batch,
         args.accum,
         args.ssd,
         args.checkpointing,
         args.muon
     );
+
+    if args.precision_diagnostics {
+        let diagnostics = model.precision_diagnostics(input.clone(), target.clone());
+        println!(
+            "precision activation_min={:.6e} activation_max={:.6e} activation_mean={:.6e} \
+             grad_norm={:.6e} loss_scale={:.1} nonfinite_count={} loss={:.6}",
+            diagnostics.activation_min,
+            diagnostics.activation_max,
+            diagnostics.activation_mean,
+            diagnostics.grad_norm,
+            diagnostics.loss_scale,
+            diagnostics.nonfinite_count,
+            diagnostics.loss
+        );
+        anyhow::ensure!(
+            diagnostics.nonfinite_count == 0 && diagnostics.loss.is_finite(),
+            "precision diagnostic found non-finite values"
+        );
+    }
 
     for step in 0..args.warmup {
         let (next, loss) = optimizer_step(model, &mut optim, &input, &target, args.accum, &device)?;

@@ -5,7 +5,6 @@ use burn::prelude::*;
 use burn::tensor::activation::log_softmax;
 
 use crate::config;
-use crate::model::chunked_loss::{DEFAULT_CHUNK, chunked_cross_entropy};
 use crate::model::{Block, init};
 
 /// A quasar model, built from [`config::Model`].
@@ -51,7 +50,8 @@ impl Quasar {
 
     /// `[batch, seq] -> [batch, seq, vocab]`.
     pub fn forward(&self, tokens: Tensor<2, Int>) -> Tensor<3> {
-        let x = self.hidden(tokens);
+        let x = self.blocks.iter().fold(self.embed.forward(tokens), |x, b| b.forward(x));
+        let x = self.norm.forward(x);
         match &self.head {
             Some(head) => head.forward(x),
             None => x.matmul(self.embed.weight.val().transpose().unsqueeze()),
@@ -60,26 +60,8 @@ impl Quasar {
 
     /// Next-token loss over every position.
     pub fn loss(&self, tokens: Tensor<2, Int>, targets: Tensor<2, Int>) -> Loss {
-        if chunked_loss_enabled() {
-            let hidden = self.hidden(tokens);
-            let weight = match &self.head {
-                Some(head) => head.weight.val().transpose(),
-                None => self.embed.weight.val(),
-            };
-            Loss::chunked(hidden, weight, targets, self.z_loss)
-        } else {
-            Loss::new(self.forward(tokens), targets, self.z_loss)
-        }
+        Loss::new(self.forward(tokens), targets, self.z_loss)
     }
-
-    fn hidden(&self, tokens: Tensor<2, Int>) -> Tensor<3> {
-        let x = self.blocks.iter().fold(self.embed.forward(tokens), |x, b| b.forward(x));
-        self.norm.forward(x)
-    }
-}
-
-fn chunked_loss_enabled() -> bool {
-    std::env::var("QUASAR_CHUNKED_CROSS_ENTROPY").map_or(true, |value| value != "0")
 }
 
 /// The training objective and its parts, kept separate so a run can log the
@@ -102,12 +84,6 @@ impl Loss {
         let column = [0..batch, 0..seq, 0..1];
         let z = (logits.slice(column.clone()) - logp.slice(column)).powi_scalar(2).mean();
 
-        let total = nll.clone() + z.clone().mul_scalar(z_loss);
-        Self { nll, z, total }
-    }
-
-    fn chunked(hidden: Tensor<3>, weight: Tensor<2>, targets: Tensor<2, Int>, z_loss: f64) -> Self {
-        let (nll, z) = chunked_cross_entropy(hidden, weight, targets, DEFAULT_CHUNK);
         let total = nll.clone() + z.clone().mul_scalar(z_loss);
         Self { nll, z, total }
     }

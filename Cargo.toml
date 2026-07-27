@@ -41,12 +41,6 @@ burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2cc
     "std",
     "burnpack",
 ] }
-# The chunked language-model loss is a Burn backend extension with a custom
-# autodiff node. GPU builds register it as one Fusion operation whose inner
-# implementation recomputes one logits chunk at a time.
-burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, optional = true }
-burn-fusion = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, optional = true }
-burn-ir = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -85,14 +79,7 @@ ndarray = ["burn/ndarray", "burn-mamba/backend-ndarray"]
 # extension trait for `Fusion` only under that feature. Without it the extension
 # is missing for the very backend that was asked for, which is a compile error
 # inside burn-mamba rather than anything readable.
-gpu = [
-    "burn/autotune",
-    "burn/fusion",
-    "burn-mamba/fusion",
-    "dep:burn-cubecl",
-    "dep:burn-fusion",
-    "dep:burn-ir",
-]
+gpu = ["burn/autotune", "burn/fusion", "burn-mamba/fusion"]
 wgpu = ["gpu", "burn/wgpu", "burn-mamba/backend-wgpu"]
 vulkan = ["gpu", "burn/vulkan", "burn-mamba/backend-vulkan"]
 rocm = ["gpu", "burn/rocm", "burn-mamba/backend-rocm"]

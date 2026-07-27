@@ -58,6 +58,7 @@ jobs:
   # parameter -- and the artifacts are the point of it: the metrics board and the
   # contact sheet are what say whether it worked.
   blueprints:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     timeout-minutes: 75
     steps:
@@ -121,7 +122,6 @@ jobs:
   # Off by default: it and `blueprints` share one runner, and the kernel
   # numbers only move when the kernels do. Run it from the Actions tab.
   gpu-benchmark:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     timeout-minutes: 15
     steps:

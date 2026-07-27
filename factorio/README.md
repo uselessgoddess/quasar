@@ -202,14 +202,14 @@ refuses incomplete replicates and bootstraps within target and prompt strata
 instead of treating repeated generations of one specification as unrelated
 examples.
 
-`dag-v2` is separate for the same reason. Green science and power switch each
-have 32 canonical route forms. The same eight combinations of spacing, edge
-margin and two target-specific route choices are reserved per target; the other
-24 remain available to training. Two stable port/orientation prompts per
-target/form make 32 conditions in total. Thus the DAG curve measures both
-geometric composition and transfer to a second recipe graph without leaking
-reference layouts, reserving either capability out of the corpus, or doubling
-the previous generation budget.
+`dag-v3` is separate for the same reason. Green science, power switch and fast
+splitter each have 32 canonical route forms. The same eight combinations of
+spacing, edge margin and two target-specific route choices are reserved per
+target; the other 24 remain available to training. One stable port/orientation
+prompt per target/form makes 24 balanced conditions in total. Thus the DAG
+curve measures geometric composition and transfer across three recipe graphs
+without leaking reference layouts or pushing the already near-limit GPU job
+past its 75-minute budget.
 
 ## What the corpus is
 
@@ -232,7 +232,7 @@ to invent them; a mis-remembered ratio produces a factory that looks perfect and
 starves, and there is no reason to buy a probabilistic version of a table that
 is already exact.
 
-A chain is not always a line. The live `plan.modules` catalogue has 31 targets.
+A chain is not always a line. The live `plan.modules` catalogue has 32 targets.
 Five branch: the last machine wants two items that both have to be made, which a
 run of stacked bands cannot deliver — a belt hands its product downstream and
 nowhere else, so the first of the two would sail past the row that wants it.
@@ -241,23 +241,26 @@ and `synth` draws them as two bottom-aligned columns dropping onto one belt with
 that stage beneath it. Which generic layout a target gets is derived from the
 plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
 
-The last two are deliberately less generic. Green science is a six-recipe
+The last three are deliberately less generic. Green science is a six-recipe
 diamond: gears feed both middle branches, and the inserter needs circuits,
 gears, and iron plate, one item more than a belt has lanes. Its `factory` layout
 therefore has two external iron belts, a shared circuit-and-gear belt, and an
 underground crossing before the two products meet at the science assembler.
 Power switch is the second DAG: cable feeds both circuits and a three-ingredient
 final assembler. Its shared iron-and-cable belt and separate circuit belt test
-the same hard constraints with a different topology. Each conveyor graph is
-drawn in 32 canonical forms: four spacings, two edge margins and two independent
-target-specific route choices. Rotations, reflections and belt tiers do not
-count toward those 32 because corpus canonicalisation already identifies them.
-The pinned `module-v1` baseline remains the preceding 29-target task, while
-`dag-v2` measures both capabilities on held-out route combinations.
+the same hard constraints with a different topology. Fast splitter is the third
+and first double diamond: six stages share both circuits and gears, and both the
+splitter and fast-splitter stages join three ingredients delivered over
+separate two-item trunks. Each conveyor graph is drawn in 32 canonical forms:
+four spacings, two edge margins and two independent target-specific route
+choices. Rotations, reflections and belt tiers do not count toward those 32
+because corpus canonicalisation already identifies them. The pinned
+`module-v1` baseline remains the preceding 29-target task, while `dag-v3`
+measures all three capabilities on held-out route combinations.
 
 ![Green science multi-belt factory](../docs/screenshots/green-science.png)
 
-![Two DAGs over eight held-out route combinations](../docs/screenshots/dag-v2-forms.png)
+![Three DAGs over eight held-out route combinations](../docs/screenshots/dag-v3-forms.png)
 
 Two decisions matter more than the rest:
 

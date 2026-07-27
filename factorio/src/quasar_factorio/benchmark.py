@@ -14,6 +14,10 @@ directly from the planner catalogue instead:
 The reference blueprints are not training examples.  :mod:`dataset` reserves
 their canonical layouts before writing either shard, which gives the benchmark
 the same design-level holdout guarantee as the ordinary validation split.
+
+``dag-v1`` is the companion measurement for the first multi-belt recipe graph:
+32 prompts over eight held-out green-science route combinations.  It stays
+separate so the pinned module baseline does not move when DAG data changes.
 """
 
 from __future__ import annotations
@@ -32,8 +36,12 @@ from .grammar import Spec
 from .prototypes import Data, load
 
 VERSION = "module-v1"
+DAG_VERSION = "dag-v1"
 DEFAULT_SIZE = 64
+DAG_SIZE = 32
+DAG_VARIANTS = 4
 DEFAULT_SEED = 19
+DAG_TARGET = "logistic-science-pack|iron-plate,copper-plate|d4|factory"
 
 # The benchmark is a versioned measurement, not a view of whatever happens to
 # be in the current generator catalogue.  Keep the exact issue-19 baseline
@@ -71,6 +79,16 @@ TARGETS = (
     "underground-belt|iron-plate|d3|stack",
 )
 
+# A fractional holdout over the four geometry axes.  Every individual value is
+# present in training, but these eight combinations are not: generalisation is
+# measured without reserving all 32 forms and thereby removing the DAG from the
+# corpus altogether.
+DAG_FORMS = tuple(
+    form
+    for form in synth.FACTORY_FORMS
+    if form.upstream_swapped == bool(form.spacing % 2) and form.middle_swapped == bool(form.margin)
+)
+
 
 @dataclass(frozen=True)
 class Case:
@@ -83,11 +101,13 @@ class Case:
     blueprint: Blueprint
     spec: Spec
     reference: str
+    benchmark: str = VERSION
+    layout: str | None = None
 
     def record(self) -> dict:
         """The JSON record consumed by ``quasar generate``."""
-        return {
-            "benchmark": VERSION,
+        record = {
+            "benchmark": self.benchmark,
             "benchmark_prompt": self.prompt_id,
             "benchmark_target": self.target_id,
             "benchmark_variant": self.variant,
@@ -97,6 +117,9 @@ class Case:
             "prompt": grammar.prompt(self.spec),
             "reference": self.reference,
         }
+        if self.layout is not None:
+            record["benchmark_layout"] = self.layout
+        return record
 
 
 def target_id(target: plan.Module) -> str:
@@ -184,6 +207,77 @@ def cases(
     return tuple(found)
 
 
+@functools.cache
+def dag_cases(
+    data: Data | None = None,
+    *,
+    seed: int = DEFAULT_SEED,
+) -> tuple[Case, ...]:
+    """Build fixed prompts over held-out green-science route combinations.
+
+    ``module-v1`` remains pinned to its original 29 pre-DAG targets.  This
+    companion benchmark asks the narrower question introduced by the new
+    training data: can the model connect the same diamond recipe graph in eight
+    held-out combinations of sibling order, spacing, and edge margin? Four
+    port/orientation prompts per layout make 32 fixed conditions.
+    """
+    data = data or load()
+    available = {target_id(target): target for target in plan.modules(data)}
+    if DAG_TARGET not in available:
+        raise ValueError(f"{DAG_VERSION} target is no longer available: {DAG_TARGET}")
+    target = available[DAG_TARGET]
+    name = target_id(target)
+    found: list[Case] = []
+    keys: set[str] = set()
+    prompts: set[str] = set()
+    for form in DAG_FORMS:
+        layout_key: str | None = None
+        for variant in range(DAG_VARIANTS):
+            for attempt in range(100):
+                draw_seed = _seed(f"{DAG_VERSION}:{seed}:{name}:{form.name}:{variant}:{attempt}")
+                rng = random.Random(draw_seed)
+                blueprint, spec = synth.module_for(rng, data, target, factory_form=form)
+                reference = grammar.serialise(blueprint, data, spec)
+                key = augment.canonical(blueprint, data)
+                prompt = grammar.prompt(spec)
+                if prompt in prompts:
+                    continue
+                if layout_key is None:
+                    if key in keys:
+                        continue
+                    keys.add(key)
+                    layout_key = key
+                elif key != layout_key:
+                    raise ValueError(f"{form.name} is not one canonical layout")
+                report = validate.grade(reference, data)
+                if not (
+                    report.valid
+                    and report.delivers == report.fed == report.working == 1.0
+                    and report.mixed == report.leaks == 0
+                ):
+                    raise ValueError(f"benchmark reference is not a working DAG: {form.name}")
+                prompts.add(prompt)
+                found.append(
+                    Case(
+                        prompt_id=f"{name}|{form.name}|v{variant}",
+                        target_id=name,
+                        variant=variant,
+                        shape=target.shape,
+                        blueprint=blueprint,
+                        spec=spec,
+                        reference=reference,
+                        benchmark=DAG_VERSION,
+                        layout=form.name,
+                    )
+                )
+                break
+            else:  # pragma: no cover - the catalogue no longer supports the measurement
+                raise ValueError(f"could not draw a unique DAG prompt for {form.name} v{variant}")
+    if len(found) != DAG_SIZE:
+        raise ValueError(f"{DAG_VERSION} expected {DAG_SIZE} prompts, found {len(found)}")
+    return tuple(found)
+
+
 def write(path: pathlib.Path, selected: tuple[Case, ...]) -> None:
     """Write prompts as JSONL in their stable catalogue/variant order."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,8 +326,11 @@ def evaluate(
         raise ValueError("no benchmark samples")
 
     versions = {sample.get("benchmark") for sample in samples}
-    if versions != {VERSION}:
-        raise ValueError(f"expected benchmark {VERSION}, found {sorted(map(str, versions))}")
+    if len(versions) != 1:
+        raise ValueError(f"expected one benchmark version, found {sorted(map(str, versions))}")
+    version = next(iter(versions))
+    if version not in {VERSION, DAG_VERSION}:
+        raise ValueError(f"unknown benchmark {version}")
 
     required = ("benchmark_prompt", "benchmark_target", "shape", "replicate", "sampling_seed")
     for index, sample in enumerate(samples, 1):
@@ -248,18 +345,22 @@ def evaluate(
         all_rows.append(row)
         by_replicate.setdefault(int(sample["replicate"]), []).append(row)
 
-    definitions = {case.prompt_id: case.record() for case in cases(data)}
+    selected_cases = cases(data) if version == VERSION else dag_cases(data)
+    definitions = {case.prompt_id: case.record() for case in selected_cases}
     expected = set(definitions)
     found = {sample["benchmark_prompt"] for sample, _ in all_rows}
     missing, unknown = expected - found, found - expected
     if missing or unknown:
         raise ValueError(
-            f"{VERSION} prompt set differs: {len(missing)} missing, {len(unknown)} unknown"
+            f"{version} prompt set differs: {len(missing)} missing, {len(unknown)} unknown"
         )
     seeds: set[int] = set()
     for sample, _ in all_rows:
         definition = definitions[sample["benchmark_prompt"]]
-        for field in ("benchmark_target", "shape", "prompt"):
+        fields = ["benchmark_target", "shape", "prompt"]
+        if "benchmark_layout" in definition:
+            fields.append("benchmark_layout")
+        for field in fields:
             if sample.get(field) != definition[field]:
                 raise ValueError(f"{sample['benchmark_prompt']} has changed {field}")
         sample_seed = int(sample["sampling_seed"])
@@ -301,13 +402,25 @@ def evaluate(
         selected = [report for sample, report in all_rows if sample["benchmark_target"] == name]
         targets[name] = validate.summarise(selected).to_dict()
 
+    layouts = {}
+    for layout in sorted(
+        {sample["benchmark_layout"] for sample, _ in all_rows if "benchmark_layout" in sample}
+    ):
+        selected = [
+            report for sample, report in all_rows if sample.get("benchmark_layout") == layout
+        ]
+        layouts[layout] = validate.summarise(selected).to_dict()
+
     return {
-        "benchmark": VERSION,
+        "benchmark": version,
         "samples": len(samples),
         "prompts": len(expected),
         "targets": len(targets),
         "fork_prompts": len(
             {sample["benchmark_prompt"] for sample, _ in all_rows if sample["shape"] == "fork"}
+        ),
+        "factory_prompts": len(
+            {sample["benchmark_prompt"] for sample, _ in all_rows if sample["shape"] == "factory"}
         ),
         "replicates": len(by_replicate),
         "summary": summary.to_dict(),
@@ -320,6 +433,7 @@ def evaluate(
         "by_replicate": replicas,
         "by_shape": shapes,
         "by_target": targets,
+        "by_layout": layouts,
     }
 
 

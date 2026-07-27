@@ -1,10 +1,11 @@
 """The fixed evaluation set and its repeated-sampling statistics."""
 
 import json
+import random
 
 import pytest
 
-from quasar_factorio import benchmark, prototypes
+from quasar_factorio import augment, benchmark, plan, prototypes, synth
 from quasar_factorio.cli import main
 
 DATA = prototypes.load()
@@ -21,6 +22,22 @@ def repeated_samples():
                 "text": case.reference,
                 "replicate": replicate,
                 "sampling_seed": 1_337 + replicate * len(selected) + index,
+            }
+            rows.append(record)
+    return rows
+
+
+@pytest.fixture(scope="module")
+def repeated_dag_samples():
+    selected = benchmark.dag_cases(DATA)
+    rows = []
+    for replicate in range(2):
+        for index, case in enumerate(selected):
+            record = case.record()
+            record |= {
+                "text": case.reference,
+                "replicate": replicate,
+                "sampling_seed": 7_331 + replicate * len(selected) + index,
             }
             rows.append(record)
     return rows
@@ -44,6 +61,45 @@ def test_the_benchmark_is_byte_stable_for_the_same_version_and_seed():
     first = [case.record() for case in benchmark.cases(DATA)]
     second = [case.record() for case in benchmark.cases(DATA)]
     assert first == second
+
+
+def test_dag_benchmark_covers_every_held_out_factory_form():
+    selected = benchmark.dag_cases(DATA)
+    assert len(selected) == benchmark.DAG_SIZE
+    assert {case.layout for case in selected} == {form.name for form in benchmark.DAG_FORMS}
+    assert len({augment.canonical(case.blueprint, DATA) for case in selected}) == len(
+        benchmark.DAG_FORMS
+    )
+    assert len({case.record()["prompt"] for case in selected}) == len(selected)
+    assert all(case.benchmark == benchmark.DAG_VERSION for case in selected)
+    assert len(synth.FACTORY_FORMS) - len(benchmark.DAG_FORMS) == 24
+
+
+def test_dag_holdout_leaves_twenty_four_route_forms_for_training():
+    target = next(
+        target
+        for target in plan.modules(DATA)
+        if benchmark.target_id(target) == benchmark.DAG_TARGET
+    )
+    reserved = benchmark.reserved(benchmark.dag_cases(DATA), DATA)
+    available = {
+        augment.canonical(
+            synth.module_for(random.Random(seed), DATA, target, factory_form=form)[0],
+            DATA,
+        )
+        for seed, form in enumerate(synth.FACTORY_FORMS)
+        if form not in benchmark.DAG_FORMS
+    }
+    assert len(reserved) == len(benchmark.DAG_FORMS) == 8
+    assert len(available) == 24
+    assert not reserved & available
+
+
+def test_a_perfect_dag_run_reports_every_layout(repeated_dag_samples):
+    result = benchmark.evaluate(repeated_dag_samples, DATA, iterations=20)
+    assert (result["samples"], result["prompts"], result["factory_prompts"]) == (64, 32, 32)
+    assert len(result["by_layout"]) == 8
+    assert result["summary"]["mean_flow"] == 1.0
 
 
 def test_a_perfect_repeated_run_has_a_tight_perfect_interval(repeated_samples):

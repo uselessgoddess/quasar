@@ -65,10 +65,11 @@ class Stats:
     #: Documents discarded as byte-identical to one already written.
     duplicates: int = 0
     rejected: int = 0
-    #: Draws withheld because their canonical layout belongs to the fixed
-    #: module benchmark. They are neither train nor validation documents.
+    #: Draws withheld because their canonical layout belongs to a fixed
+    #: benchmark. They are neither train nor validation documents.
     benchmark_excluded: int = 0
     benchmark_prompts: int = 0
+    dag_benchmark_prompts: int = 0
     train_docs: int = 0
     valid_docs: int = 0
     train_tokens: int = 0
@@ -141,8 +142,10 @@ def build(
     valid = shards.Writer(out / "valid", len(encoder), encoder.eos)
     stats = Stats(vocab_size=len(encoder))
     fixed = benchmark.cases(data)
-    reserved = benchmark.reserved(fixed, data)
+    dag_fixed = benchmark.dag_cases(data)
+    reserved = benchmark.reserved(fixed + dag_fixed, data)
     stats.benchmark_prompts = len(fixed)
+    stats.dag_benchmark_prompts = len(dag_fixed)
     sides: dict[str, bool] = {}
     seen: set[bytes] = set()
     held: list[Design] = []
@@ -225,6 +228,7 @@ def build(
     stats.valid_tokens = valid.finish().tokens
     _write_prompts(out / "prompts.jsonl", held, data, prompts)
     benchmark.write(out / "benchmark.jsonl", fixed)
+    benchmark.write(out / "dag-benchmark.jsonl", dag_fixed)
     (out / "manifest.json").write_text(json.dumps(stats.to_dict(), indent=2) + "\n")
     return stats
 

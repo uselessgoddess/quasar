@@ -159,7 +159,7 @@ def _parser() -> argparse.ArgumentParser:
     plot.add_argument(
         "--kind",
         default="module",
-        help="the generator that gets a flow panel of its own (default: module); empty for none",
+        help="the kind or shape that gets a flow panel (default: module); empty for none",
     )
     plot.add_argument("--columns", type=int, default=2)
     plot.set_defaults(run=_plot)
@@ -226,6 +226,7 @@ def _build(args) -> int:
             ("rejected", stats.rejected),
             ("benchmark excluded", stats.benchmark_excluded),
             ("benchmark prompts", stats.benchmark_prompts),
+            ("DAG benchmark prompts", stats.dag_benchmark_prompts),
             ("train tokens", stats.train_tokens),
             ("valid tokens", stats.valid_tokens),
             ("vocab", stats.vocab_size),
@@ -361,7 +362,10 @@ def _benchmark(args) -> int:
         iterations=args.bootstrap,
         seed=args.seed,
     )
-    _rule("MODULE BENCHMARK", str(args.samples))
+    title = (
+        "DAG FLOW BENCHMARK" if result["benchmark"] == benchmark.DAG_VERSION else "MODULE BENCHMARK"
+    )
+    _rule(title, str(args.samples))
     _rows(
         [
             ("version", result["benchmark"]),
@@ -369,6 +373,7 @@ def _benchmark(args) -> int:
             ("fixed prompts", result["prompts"]),
             ("target strata", result["targets"]),
             ("fork prompts", result["fork_prompts"]),
+            ("factory prompts", result["factory_prompts"]),
             ("sampling replicates", result["replicates"]),
         ]
     )
@@ -557,15 +562,19 @@ def _flow_panels(
 
 
 def _of_kind(samples: Iterable[dict], kind: str | None) -> list[dict]:
-    """The generations whose prompt came from one generator.
+    """The generations whose prompt came from one generator kind or shape.
 
     `quasar generate` copies every field of a prompt record into the sample it
-    writes, so the kind rides along with the generation and nothing has to be
-    matched up afterwards. A sample with no `kind` at all — a hand-written
-    prompt file — belongs to no generator and is dropped rather than counted.
+    writes, so both fields ride along with the generation and nothing has to be
+    matched up afterwards. A sample with neither match — including a
+    hand-written prompt file — is dropped rather than counted.
     """
     samples = list(samples)
-    return samples if not kind else [s for s in samples if s.get("kind") == kind]
+    return (
+        samples
+        if not kind
+        else [s for s in samples if s.get("kind") == kind or s.get("shape") == kind]
+    )
 
 
 def _summaries(

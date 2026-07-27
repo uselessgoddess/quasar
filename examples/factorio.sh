@@ -19,7 +19,7 @@ cd "$repo_root"
 
 out=${1:-runs/nano}
 corpus=${CORPUS:-$out/corpus}
-# 6,000 designs is roughly where the generators start repeating themselves at
+# 6,000 draws is roughly where the generators start repeating themselves at
 # four variants each; see factorio/experiments/saturation.py.
 designs=${DESIGNS:-6000}
 # Empty means the preset's own length; see the train stage.
@@ -31,9 +31,12 @@ prompts=${PROMPTS:-24}
 # estimate of sampling variance.  They share one checkpoint load, so repeats
 # are much cheaper than separate generate invocations.
 benchmark_repeats=${BENCHMARK_REPEATS:-2}
+# The DAG curve needs coverage of all 32 fixed prompts more than duplicate
+# sampling. One draw per prompt keeps the extra pass inside the CI GPU budget.
+dag_benchmark_repeats=${DAG_BENCHMARK_REPEATS:-1}
 backend=${BACKEND:-}
 # Human blueprints, if a cache has been fetched — 20,000 weighted draws are
-# 14.1M tokens and the Chinchilla budget wants 71.4M. Absent, the run
+# 14.4M tokens and the Chinchilla budget wants 71.4M. Absent, the run
 # is synthetic-only and everything else about it is unchanged, which is what
 # keeps this script runnable on a box with no network.
 #
@@ -128,6 +131,15 @@ for checkpoint in "$out"/step_*; do
         --out "$out/benchmark-samples-$step.jsonl" \
         --tokens 460 --temperature 0.7 --top-k 20 \
         --repeats "$benchmark_repeats"
+    # A separate held-out curve for one semantic diamond DAG: four prompts over
+    # each of eight unseen route combinations. Keeping it out of module-v1
+    # preserves that benchmark's baseline.
+    "${quasar[@]}" generate "$checkpoint" \
+        --tokenizer "$corpus/tokenizer.json" \
+        --prompts "$corpus/dag-benchmark.jsonl" \
+        --out "$out/dag-samples-$step.jsonl" \
+        --tokens 460 --temperature 0.7 --top-k 20 \
+        --repeats "$dag_benchmark_repeats"
     # Pre-register the first checkpoint for inference A/B.  The full baseline
     # run measures it well below saturation; choosing it before looking at this
     # run's samples avoids selecting a conveniently favourable checkpoint.
@@ -140,11 +152,15 @@ done
 stage grade
 last=$(ls "$out"/samples-*.jsonl | tail -1)
 benchmark_last=$(ls "$out"/benchmark-samples-*.jsonl | tail -1)
+dag_last=$(ls "$out"/dag-samples-*.jsonl | tail -1)
 "${harness[@]}" grade "$last" \
     --sheet "$out/sheet.png" --json "$out/grade.json" --columns 4
 "${harness[@]}" grade "$benchmark_last" \
     --sheet "$out/failures.png" --order worst >/dev/null
 "${harness[@]}" benchmark "$benchmark_last" --json "$out/benchmark.json"
+"${harness[@]}" grade "$dag_last" \
+    --sheet "$out/dag-failures.png" --order worst >/dev/null
+"${harness[@]}" benchmark "$dag_last" --json "$out/dag-benchmark.json"
 
 # One additional pass at the pre-registered, unsaturated first checkpoint
 # compares prevention with post-hoc rejection on the same fixed prompts.
@@ -182,6 +198,8 @@ done
 stage plot
 "${harness[@]}" plot "$out/train.log" "$out/metrics.png" \
     --grade "$out"/benchmark-samples-*.jsonl
+"${harness[@]}" plot "$out/train.log" "$out/dag-metrics.png" \
+    --kind factory --grade "$out"/dag-samples-*.jsonl
 
 # The best generation, as a blueprint string. This is the whole point of the
 # exercise: something that can be pasted into the game.
@@ -191,7 +209,8 @@ stage plot
 # perfect score and the tie-break is entity count — that `best.png` need never
 # show the one task the run is about. `best-module.png` is the module the model
 # built best, whatever the rest of the benchmark did.
-"$python" - "$last" "$benchmark_last" "$out/best.txt" "$out/best-module.txt" <<'PY'
+"$python" - "$last" "$benchmark_last" "$dag_last" \
+    "$out/best.txt" "$out/best-module.txt" "$out/best-dag.txt" <<'PY'
 import json
 import pathlib
 import sys
@@ -204,6 +223,7 @@ samples = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().sp
 benchmark = [
     json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines() if line
 ]
+dag = [json.loads(line) for line in pathlib.Path(sys.argv[3]).read_text().splitlines() if line]
 
 
 def rank(sample):
@@ -217,11 +237,15 @@ def rank(sample):
 
 
 ranked = sorted(samples, key=rank, reverse=True)
-pathlib.Path(sys.argv[3]).write_text(ranked[0]["text"] if ranked else "")
+pathlib.Path(sys.argv[4]).write_text(ranked[0]["text"] if ranked else "")
 
 # Same ranking, over the dedicated module benchmark.
 modules = sorted(benchmark, key=rank, reverse=True)
-pathlib.Path(sys.argv[4]).write_text(modules[0]["text"] if modules else "")
+pathlib.Path(sys.argv[5]).write_text(modules[0]["text"] if modules else "")
+
+# And over the held-out forms of the green-science DAG.
+dags = sorted(dag, key=rank, reverse=True)
+pathlib.Path(sys.argv[6]).write_text(dags[0]["text"] if dags else "")
 PY
 "${harness[@]}" render "$out/best.txt" "$out/best.png" || true
 "${harness[@]}" export "$out/best.txt" >"$out/best.blueprint" || true
@@ -229,11 +253,14 @@ PY
 # no module, or whose best module does not parse, leaves an empty file behind.
 "${harness[@]}" render "$out/best-module.txt" "$out/best-module.png" || true
 "${harness[@]}" export "$out/best-module.txt" >"$out/best-module.blueprint" || true
+"${harness[@]}" render "$out/best-dag.txt" "$out/best-dag.png" || true
+"${harness[@]}" export "$out/best-dag.txt" >"$out/best-dag.blueprint" || true
 
 echo
 timings[-1]="${timings[-1]}$((SECONDS - started))s"
 printf '%s\n' "${timings[@]}"
 printf '%-24s%ss\n' total "$SECONDS"
 echo
-echo "artifacts in $out: metrics.png sheet.png modules.png failures.png corpus.png"
-echo "                best.png best-module.png frames/"
+echo "artifacts in $out: metrics.png dag-metrics.png sheet.png modules.png"
+echo "                failures.png dag-failures.png corpus.png"
+echo "                best.png best-module.png best-dag.png frames/"

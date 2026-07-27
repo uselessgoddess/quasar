@@ -144,6 +144,13 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --prompts corpus/benchmark.jsonl --out runs/nano/benchmark-samples-000400.jsonl \
     --tokens 460 --repeats 2
 
+# the companion DAG benchmark: 8 held-out route combinations, four independent
+# port/orientation prompts each
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json \
+    --prompts corpus/dag-benchmark.jsonl --out runs/nano/dag-samples-000400.jsonl \
+    --tokens 460
+
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
     --sheet runs/nano/sheet.png --json runs/nano/grade.json
@@ -151,6 +158,8 @@ python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
 # a stratified report with a 95% prompt-and-sampling bootstrap interval
 python -m quasar_factorio.cli benchmark \
     runs/nano/benchmark-samples-000400.jsonl --json runs/nano/benchmark.json
+python -m quasar_factorio.cli benchmark \
+    runs/nano/dag-samples-000400.jsonl --json runs/nano/dag-benchmark.json
 
 # Prevent malformed/overlapping/off-zone/illegal placements while sampling
 cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
@@ -166,6 +175,8 @@ python -m quasar_factorio.cli compare-inference \
 
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
     --grade runs/nano/benchmark-samples-*.jsonl
+python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/dag-metrics.png \
+    --kind factory --grade runs/nano/dag-samples-*.jsonl
 
 # and the end of the whole thing: something to paste into the game
 python -m quasar_factorio.cli export design.txt | xclip -selection clipboard
@@ -190,6 +201,14 @@ metadata and adds `replicate` and `sampling_seed` to every row; `benchmark`
 refuses incomplete replicates and bootstraps within target and prompt strata
 instead of treating repeated generations of one specification as unrelated
 examples.
+
+`dag-v1` is separate for the same reason. The green-science generator has 32
+canonical route forms. Eight combinations of spacing, edge margin, upper-stage
+order and middle-stage order are reserved in full; the other 24 remain
+available to training. Four stable port/orientation prompts per held-out form
+make 32 conditions. Thus the DAG curve measures composition across unseen route
+combinations without either leaking their reference layouts or reserving the
+whole new capability out of the corpus.
 
 ## What the corpus is
 
@@ -228,10 +247,16 @@ therefore has two external iron belts, a shared circuit-and-gear belt, and an
 underground crossing before the two products meet at the science assembler.
 That concrete generator is the first multi-belt DAG milestone; another arbitrary
 DAG does not enter the catalogue merely because the arithmetic planner can count
-it. The pinned `module-v1` baseline remains the preceding 29-target task, so the
-new capability cannot silently make the comparison easier or harder.
+it. The same conveyor graph is drawn in 32 canonical forms: four upstream
+spacings, two edge margins and independent swaps of the two upper and two middle
+recipe stages. Rotations, reflections and belt tiers do not count toward those
+32 because corpus canonicalisation already identifies them. The pinned
+`module-v1` baseline remains the preceding 29-target task, while `dag-v1`
+measures the new capability on held-out route combinations.
 
 ![Green science multi-belt factory](../docs/screenshots/green-science.png)
+
+![Eight held-out green-science route combinations](../docs/screenshots/dag-forms.png)
 
 Two decisions matter more than the rest:
 
@@ -252,12 +277,14 @@ generator that has run out of things to say costs a draw and adds nothing, and
 `experiments/saturation.py` says which ones those are. `build --module-weight`
 moves that share without touching the proportions among the rest.
 
-A 20,000-draw build measures 10,498 distinct layouts, 66,004 documents and
-14.12M training tokens at a 739-token vocabulary; 4,376 of the layouts are
-modules. The other 9,502 draws were forms of a layout already kept, and 13,996
-of the expanded documents came out byte-identical to one already written —
-drawing from eleven generators collides, and the manifest says by how much. The
-6,000 draws `examples/factorio.sh` defaults to give 4,304 layouts and 4.65M
+A 20,000-draw build measures 10,599 distinct layouts, 66,548 documents and
+14.42M training tokens at a 739-token vocabulary; 4,353 of the layouts are
+modules. The other 9,401 draws were forms of a layout already kept, and 13,452
+of the expanded documents came out byte-identical to one already written. A
+further 618 draws matched a canonical benchmark holdout and were excluded from
+both shards — drawing from eleven generators collides, and the manifest says by
+how much. The
+6,000 draws `examples/factorio.sh` defaults to give 4,350 layouts and 4.74M
 tokens, already more than a 3.6M-parameter model gets through in half an hour.
 
 Building it is pure Python and runs before the GPU gets to do anything, so what
@@ -295,7 +322,7 @@ thing in the corpus because its parameter space is large precisely to the extent
 that nothing constrains it, and the module generator, whose space is the product
 of a target item, a chain the planner can lay out, a zone, and where its ports
 sit. That table is why the mixture is weighted at all: 20,000 weighted draws
-measure 10,498 layouts where 35,200 flat ones measure 8,362, because the draws
+measure 10,599 layouts where 35,200 flat ones measure 8,362, because the draws
 that would have gone to a generator with 44 forms in it go to the two that are
 still saying something new.
 
@@ -356,10 +383,10 @@ and a book holds seventeen blueprints on average:
 
 14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
 mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. A
-20,000-draw synthetic build is 14.1M tokens against a Chinchilla budget of
+20,000-draw synthetic build is 14.4M tokens against a Chinchilla budget of
 71.4M, so synthetic-only is five passes over everything it can say, where the
 data-constrained scaling laws put the point at which repeating stops being
-nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.9M that
+nearly free at four. 14.4M + 7.8M is 22.2M unique tokens against the 17.9M that
 four epochs of the budget need: the human half is not a garnish here, it is what
 puts the run under four epochs instead of over.
 

@@ -154,6 +154,21 @@ def test_the_fixed_module_benchmark_is_stratified_and_working(corpus):
     assert all(counts[name] >= 3 for name, shape in shapes.items() if shape == "fork")
 
 
+def test_the_fixed_dag_benchmark_covers_every_working_holdout_form(corpus):
+    out, stats = corpus
+    records = dataset.read_prompts(out / "dag-benchmark.jsonl")
+    assert len(records) == stats.dag_benchmark_prompts == benchmark.DAG_SIZE
+    assert {record["benchmark_layout"] for record in records} == {
+        form.name for form in benchmark.DAG_FORMS
+    }
+    for record in records:
+        assert record["benchmark"] == benchmark.DAG_VERSION
+        assert record["shape"] == "factory"
+        report = validate.grade(record["reference"], DATA)
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+        assert (report.mixed, report.leaks) == (0, 0)
+
+
 def test_the_fixed_benchmark_does_not_depend_on_the_corpus_seed(tmp_path):
     """Changing training data must not move the evaluation goalposts."""
     first = tmp_path / "first"
@@ -161,14 +176,18 @@ def test_the_fixed_benchmark_does_not_depend_on_the_corpus_seed(tmp_path):
     dataset.build(first, 12, seed=1, variants=1, data=DATA)
     dataset.build(second, 12, seed=999, variants=1, data=DATA)
     assert (first / "benchmark.jsonl").read_bytes() == (second / "benchmark.jsonl").read_bytes()
+    assert (first / "dag-benchmark.jsonl").read_bytes() == (
+        second / "dag-benchmark.jsonl"
+    ).read_bytes()
 
 
 def test_no_fixed_benchmark_layout_is_written_to_either_shard(corpus):
     """Exact reference geometry is reserved before the split is assigned."""
     out, _ = corpus
+    records = dataset.read_prompts(out / "benchmark.jsonl")
+    records += dataset.read_prompts(out / "dag-benchmark.jsonl")
     reserved = {
-        augment.canonical(grammar.parse(record["reference"], DATA)[0], DATA)
-        for record in dataset.read_prompts(out / "benchmark.jsonl")
+        augment.canonical(grammar.parse(record["reference"], DATA)[0], DATA) for record in records
     }
     encoder = tokenizer.Encoder(DATA)
     written = set()

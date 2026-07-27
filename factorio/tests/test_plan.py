@@ -138,14 +138,16 @@ def test_every_catalogued_module_survives_its_own_filters():
         if module.shape == "stack":
             assert plan.fork(unit) is None, module
             banded(unit, unit.stages)
-        else:
+        elif module.shape == "fork":
             # A fork is two columns of bands and a machine that takes both.
             left, right = plan.fork(unit)
-            assert module.shape == "fork", module
             banded(unit, left)
             banded(unit, right)
             assert set(unit.stages[-1].ingredients) == {left[-1].product, right[-1].product}
             assert unit.raws_of(unit.stages[-1]) == ()
+        else:
+            assert module.shape == "factory", module
+            assert module.product == "logistic-science-pack"
 
 
 def test_the_catalogue_holds_at_least_five_branching_chains():
@@ -169,18 +171,16 @@ def test_the_catalogue_holds_at_least_five_branching_chains():
         assert not linear, module
 
 
-def test_green_science_is_still_a_factory_and_for_two_reasons():
-    """The honest limit, stated as a test so it cannot be lost by accident.
+def test_green_science_gets_a_factory_layout_for_both_hard_reasons():
+    """The milestone is the first shared-intermediate, multi-belt module.
 
     Green science is the chain everyone reaches for, and a fork is exactly the
-    right shape for its last machine: an inserter and a transport belt, both
-    made, into a lab pack. It is still refused, twice over. The gear stage feeds
+    right shape for its last machine: an inserter and a transport belt, both made,
+    into a lab pack. A fork alone is insufficient. The gear stage feeds
     both branches, so they are not two independent columns but a diamond; and
     the inserter wants circuits, gears *and* iron plate, which is three item
-    types on a belt that has two lanes. Neither is fixed by branching — the
-    first needs a shared intermediate routed sideways, the second needs a second
-    belt per machine — so `logistic-science-pack` stays out of the catalogue
-    rather than going in as a layout that starves.
+    types on a belt that has two lanes. The factory layout must route the shared
+    intermediate sideways and feed those three ingredients from two belts.
     """
     unit = plan.solve(DATA, "logistic-science-pack", PLATES, rate=1e-9, depth=4)
     final, inserter = unit.stages[-1], unit.stages[-3]
@@ -188,7 +188,12 @@ def test_green_science_is_still_a_factory_and_for_two_reasons():
     assert unit.raws_of(final) == ()  # the convergence belt itself is fine
     assert len(set(inserter.ingredients)) == 3  # the belt above the inserter is not
     assert plan.fork(unit) is None
-    assert "logistic-science-pack" not in {module.product for module in plan.modules(DATA, depth=4)}
+    target = next(
+        module
+        for module in plan.modules(DATA, depth=4)
+        if module.product == "logistic-science-pack" and module.supply == PLATES
+    )
+    assert target.shape == "factory"
 
 
 def test_one_lane_is_not_enough_for_any_fork():
@@ -222,10 +227,18 @@ def test_depth_travels_with_the_module_because_it_changes_what_gets_built():
     assert {module.depth for module in catalogue} > {2}
     for module in catalogue:
         unit = plan.solve(DATA, module.product, module.supply, rate=1e-9, depth=module.depth)
-        # Depth bounds the longest path to the supply, not the stage count: a
-        # fork's two branches are the same distance down and are counted once.
-        split = plan.fork(unit)
-        longest = max(len(side) for side in split) + 1 if split else len(unit.stages)
+        # Depth bounds the longest dependency path, not the stage count. Parallel
+        # fork branches and the green-science diamond add stages without making
+        # either route from the product to its supply any deeper.
+        made = {stage.product: stage for stage in unit.stages}
+
+        def path(item, made=made):
+            stage = made.get(item)
+            if stage is None:
+                return 0
+            return 1 + max((path(ingredient) for ingredient in stage.ingredients), default=0)
+
+        longest = path(unit.product)
         assert longest <= module.depth
         # The pair is unique: two entries never disagree about how deep they are.
         twins = [

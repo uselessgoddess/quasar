@@ -5,7 +5,7 @@ cannot answer whether the model learned modules: a 48-prompt prefix contains
 only about five of them.  This module builds the primary evaluation set
 directly from the planner catalogue instead:
 
-* all 29 current targets appear at least twice;
+* all 29 targets in the pinned pre-DAG baseline appear at least twice;
 * every branching target gets a third prompt;
 * the electronic-circuit flagship gets the remaining 64th slot;
 * each prompt's seed is derived from its semantic identity, so adding or

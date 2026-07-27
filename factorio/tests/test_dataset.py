@@ -11,7 +11,6 @@ from quasar_factorio import (
     benchmark,
     dataset,
     grammar,
-    plan,
     prototypes,
     shards,
     synth,
@@ -124,7 +123,6 @@ def test_the_fixed_module_benchmark_is_stratified_and_working(corpus):
     """The primary metric has 64 real denominators, not five lucky modules."""
     out, stats = corpus
     records = dataset.read_prompts(out / "benchmark.jsonl")
-    targets = plan.modules(DATA)
     counts = {}
     shapes = {}
     for record in records:
@@ -137,7 +135,7 @@ def test_the_fixed_module_benchmark_is_stratified_and_working(corpus):
         assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
 
     assert len(records) == stats.benchmark_prompts == 64
-    assert len(counts) == len(targets) == 29
+    assert len(counts) == len(benchmark.TARGETS) == 29
     assert min(counts.values()) >= 2
     assert all(counts[name] >= 3 for name, shape in shapes.items() if shape == "fork")
 

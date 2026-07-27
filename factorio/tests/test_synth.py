@@ -110,6 +110,7 @@ def test_recipes_are_only_ever_paired_with_machines_that_can_run_them():
 
 
 FORKS = tuple(module for module in plan.modules(DATA) if module.shape == "fork")
+FACTORIES = tuple(module for module in plan.modules(DATA) if module.shape == "factory")
 
 
 def test_every_module_draw_makes_the_item_it_advertises():
@@ -135,6 +136,18 @@ def test_every_module_draw_makes_the_item_it_advertises():
         products.add(spec.product)
     assert {module.product for module in FORKS} <= products
     assert products - {module.product for module in FORKS}  # and stacks too
+
+
+def test_green_science_factory_routes_the_diamond_and_three_item_stage():
+    assert len(FACTORIES) == 1
+    target = FACTORIES[0]
+    assert target.product == "logistic-science-pack"
+    for seed in range(12):
+        blueprint, spec = synth.module_for(random.Random(seed), DATA, target)
+        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+        assert (report.mixed, report.leaks) == (0, 0)
+        assert len([port for port in spec.inputs() if port.item == "iron-plate"]) >= 2
 
 
 def test_a_branching_module_is_two_columns_and_not_a_deeper_stack():

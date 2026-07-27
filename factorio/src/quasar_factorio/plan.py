@@ -51,9 +51,9 @@ CRAFTERS = {
     "centrifuging": ("centrifuge", "centrifuge", "centrifuge"),
 }
 
-# How deep a chain may go before the planner gives up. Three is enough for
-# plate -> cable -> circuit and for plate -> gear -> belt; a module deeper than
-# that is a factory, not a module.
+# How deep a chain may go before the planner gives up. Four reaches the first
+# factory-sized graph, green science: six recipes, a shared gear intermediate,
+# and two routes that converge on the final science assembler.
 MAX_DEPTH = 4
 
 
@@ -321,10 +321,12 @@ class Module:
 
     `shape` says which layout the chain is for: `"stack"` is the run of bands
     that each hand their product to the row below, `"fork"` is two such runs side
-    by side converging on a last machine that consumes both. It is defaulted
-    because a stacked module is what the catalogue was before forks existed and
-    the pair-plus-depth remains its identity; the shape is derived from the plan
-    rather than chosen, so it never contradicts the stages `solve` returns.
+    by side converging on a last machine that consumes both, and `"factory"` is
+    an explicitly supported DAG with shared intermediates and multiple input
+    belts. It is defaulted because a stacked module was the original catalogue
+    and the pair-plus-depth remains its identity. Generic shapes are derived
+    from the plan; factory shapes are admitted only beside a concrete generator,
+    so the catalogue never promises geometry it cannot produce.
     """
 
     product: str
@@ -336,7 +338,7 @@ class Module:
 def modules(
     data: Data | None = None,
     *,
-    depth: int = 3,
+    depth: int = 4,
     lanes: int = 2,
 ) -> tuple[Module, ...]:
     """The chains a module layout can actually build, and from what.
@@ -345,8 +347,8 @@ def modules(
     than of the recipe: every stage must run in a machine that has a recipe slot
     (a furnace does not), the chain must be at least two stages long (one stage
     is an assembler row, which the corpus already has), and no belt may carry
-    more than `lanes` item types. The shape is which of the two module layouts
-    can express the plan, and a chain neither of them fits is dropped.
+    more than `lanes` item types. The shape is which supported module layout can
+    express the plan, and a chain none of them fits is dropped.
 
     *Stack* is a run of bands: each stage's belt carries what arrives from
     outside plus the product of the stage immediately above, and nothing else.
@@ -364,8 +366,13 @@ def modules(
     and pipes, a repair pack from circuits and gears — at the price of a
     convergence belt that is full: two branch products are already `lanes` item
     types, so the last stage may consume those two and nothing else. A chain
-    that additionally wants a raw item at the bottom (green science, which asks
-    for inserters, belts *and* iron plate) is still a factory here, not a module.
+    that additionally wants a raw item at the bottom cannot fit this shape.
+
+    *Factory* is deliberately concrete rather than a claim that arbitrary DAG
+    placement is solved. Green science is the first admitted example: gears are
+    shared by the inserter and transport-belt branches, while the inserter needs
+    circuits, gears, and iron plate. Its generator routes that diamond and the
+    three-item stage with two external iron belts plus a shared two-lane belt.
 
     Every boundary from two stages up to `depth` is offered, because they are
     different modules and not different qualities of the same one: a player who
@@ -389,6 +396,22 @@ def modules(
                 continue
             used = _used(unit)
             out.setdefault((product, used), Module(product, used, level, shape))
+
+    # The first factory-sized layout is deliberately explicit.  Its plan has
+    # both obstacles the one-belt stack and disjoint fork cannot express:
+    # gears feed two later stages (a diamond), and the inserter stage consumes
+    # three item types.  ``synth._factory`` gives it two iron input belts and
+    # routes the shared intermediates sideways.  Keeping this gate beside the
+    # generic catalogue filters makes the supported geometry honest: another
+    # arbitrary DAG does not enter training merely because the planner can
+    # count it.
+    if depth >= 4 and lanes >= 2:
+        supply = ("iron-plate", "copper-plate")
+        green = solve(data, "logistic-science-pack", supply, rate=1e-9, depth=4)
+        if all(data.entities[stage.machine].takes_recipe for stage in green.stages):
+            out[("logistic-science-pack", supply)] = Module(
+                "logistic-science-pack", supply, 4, "factory"
+            )
     return tuple(out.values())
 
 

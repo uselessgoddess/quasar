@@ -790,7 +790,11 @@ def module_for(rng: random.Random, data: Data, target: planner.Module) -> tuple[
     if target not in _module_targets(data):
         raise ValueError(f"module target is not in the catalogue: {target}")
     layout = Layout.draw(rng)
-    build = _forked if target.shape == "fork" else _stacked
+    build = {
+        "stack": _stacked,
+        "fork": _forked,
+        "factory": _factory,
+    }[target.shape]
     blueprint, ports, steps = build(rng, data, target, layout)
     slack = rng.choices((0, 1, 2), weights=(6, 2, 1))[0]
     return _module_spec(blueprint, ports, steps, target.product, slack, rng, data)
@@ -924,6 +928,100 @@ def _forked(
     _, tail, side = _belt_row(canvas, belt, out, fork.width, run, full=True)
     ports.append(Port("out", target.product, tail, out, "e" if side == "w" else "w"))
     return canvas.build(f"{target.product} module"), ports, unit.steps()
+
+
+def _factory(
+    rng: random.Random, data: Data, target: planner.Module, layout: Layout
+) -> tuple[Blueprint, list[Port], tuple]:
+    """The first diamond DAG: green science from iron and copper plate.
+
+    This is intentionally a concrete milestone rather than a claim that every
+    recipe DAG has one universal embedding.  Gears feed both the inserter and
+    transport-belt stages; the inserter stage itself needs three item types.
+    Two iron ports keep that raw material on separate upper and lower belts,
+    while circuits and gears share the two lanes between them.  The right-hand
+    product crosses the lower iron belt through an underground pair.
+    """
+    if (
+        target.product != "logistic-science-pack"
+        or target.supply != ("iron-plate", "copper-plate")
+        or target.depth != 4
+    ):
+        raise ValueError(f"factory layout does not support {target}")
+
+    unit = planner.solve(data, target.product, target.supply, rate=1e-9, depth=4)
+    stages = {stage.product: stage for stage in unit.stages}
+    tier = _tier(rng)
+    belt = BELTS[tier]
+    underground = UNDERGROUNDS[tier]
+    inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
+    canvas = Canvas.new(data)
+
+    # Copper enters the cable machine; cable drops onto the upper iron belt.
+    canvas.line(belt, 0, 0, 3, EAST)
+    canvas.place(inserter, 0, 1, SOUTH)
+    canvas.place(
+        stages["copper-cable"].machine,
+        0,
+        2,
+        recipe=stages["copper-cable"].recipe,
+    )
+    canvas.place(inserter, 0, 5, SOUTH)
+    canvas.line(belt, 0, 6, 9, EAST)
+
+    # Circuits and gears draw from that two-lane belt and share the next one.
+    for product, x in (("electronic-circuit", 3), ("iron-gear-wheel", 7)):
+        stage = stages[product]
+        canvas.place(inserter, x, 7, SOUTH)
+        canvas.place(stage.machine, x, 8, recipe=stage.recipe)
+        canvas.place(inserter, x, 11, SOUTH)
+    canvas.line(belt, 3, 12, 12, EAST)
+
+    # The two middle stages both take shared gears from above and iron from a
+    # second belt below. Swapping them is a real layout variant, not a rotation.
+    middle = ["inserter", "transport-belt"]
+    if rng.choice((False, True)):
+        middle.reverse()
+    for product, x in zip(middle, (9, 14), strict=True):
+        stage = stages[product]
+        canvas.place(inserter, x, 13, SOUTH)
+        canvas.place(stage.machine, x, 14, recipe=stage.recipe)
+        canvas.place(inserter, x, 17, NORTH)
+    canvas.line(belt, 16, 18, 8, WEST)
+
+    # Products leave sideways. The left machine needs a long hand to leave a
+    # belt and inserter slot beside the final 3x3 assembler.
+    canvas.place("long-handed-inserter", 8, 15, WEST)
+    canvas.line(belt, 6, 15, 7, SOUTH)
+    canvas.place(inserter, 13, 15, WEST)
+    canvas.line(belt, 12, 15, 2, SOUTH)
+    canvas.place(underground, 12, 17, SOUTH, flow="input")
+    canvas.place(underground, 12, 19, SOUTH, flow="output")
+    canvas.line(belt, 12, 20, 2, SOUTH)
+
+    # The final stage takes one branch from each side and exports on the lower
+    # edge. Its recipe is indifferent to which middle stage was swapped left.
+    final = stages["logistic-science-pack"]
+    canvas.place(final.machine, 8, 20, recipe=final.recipe)
+    canvas.place(inserter, 7, 21, EAST)
+    canvas.place(inserter, 11, 21, WEST)
+    canvas.place(inserter, 8, 23, SOUTH)
+    canvas.line(belt, 8, 24, 9, EAST)
+
+    # Two substations cover the whole 17x25 design and connect to each other.
+    # The lower one doubles as the stop for the westbound iron belt.
+    canvas.place("substation", 7, 1)
+    canvas.place("substation", 7, 17)
+    for x, y in ((3, 0), (9, 6), (15, 12), (6, 22), (12, 22)):
+        canvas.place(MODULE_POLE, x, y)
+
+    ports = [
+        Port("in", "copper-plate", 0, 0, "w"),
+        Port("in", "iron-plate", 0, 6, "w"),
+        Port("in", "iron-plate", 16, 18, "e"),
+        Port("out", "logistic-science-pack", 16, 24, "e"),
+    ]
+    return canvas.build("logistic-science-pack factory"), ports, unit.steps()
 
 
 @dataclass(frozen=True)

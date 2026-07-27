@@ -59,6 +59,30 @@ checkpointing off и один CubeCL stream. Accumulation по умолчани�
 32: effective batch остаётся `4 × 32 × 1024 = 131072`, то есть скорость не
 куплена сокращением обучения.
 
+### P0 freeze для precision-работы
+
+[Run 30310985422](https://github.com/uselessgoddess/quasar/actions/runs/30310985422)
+зафиксировал новый reference на source commit `fc0e5f8746905bb931fcc1be21eb9dd849d6d05f`
+с тем же production recipe:
+
+| samples | median | min/max | throughput | effective | peak VRAM |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 9 | 12.415 s | 12.374–16.706 s | **10 558 tok/s** | **5.11 TFLOP/s** | **14.516 GiB** |
+
+Первое measured значение попало в дополнительный autotune и дало разброс 35%;
+по обязательному правилу окно автоматически расширилось с 3 до 9. Значения
+2–9 лежат в диапазоне 10 540–10 593 tok/s, поэтому медиана не определяется
+этим выбросом. Карта доходила до 100% busy, 3.16 GHz, 357 W и junction 84 °C,
+то есть downclock/throttling baseline не объясняет.
+
+Profiler после warm-up насчитал **6 668 launches** за micro-batch. Их GPU
+timestamps составили 392.10 ms, тогда как wall time стабильного sample —
+1.040 s: около 62% wall time остаётся вне записанной kernel duration. Пять
+семейств matmul дали 1 221 launch и 264.35 ms, то есть 67.4% GPU timestamps.
+Текущий bottleneck поэтому смешанный: матричный compute плюс
+launch/orchestration overhead. Изолированный roofline и precision gate
+записаны в [`ROOFLINE.md`](ROOFLINE.md).
+
 Увеличивать micro-batch выше измеренного нельзя по принципу «раз помещается»:
 6×8 без checkpointing не завершился OOM, но упал до 2 715 tok/s из-за memory
 pressure. Пик VRAM и steady throughput нужно проверять вместе.

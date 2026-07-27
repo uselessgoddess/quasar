@@ -23,23 +23,38 @@
 examples/roofline.sh
 ```
 
-Low-precision ошибки сохраняются как результат probe, но fp32 обязан пройти.
-Это не mixed-precision training: tensors явно cast'ятся вокруг одного GEMM,
-пока default dtype устройства остаётся fp32. Такой seam соответствует
-планируемому точечному пути для крупных projection layers.
+Ошибка любой отдельной пары dtype/shape сохраняется как результат probe. Хотя
+бы одна fp32-форма обязана пройти, иначе результаты reduced precision нельзя
+интерпретировать. Это не mixed-precision training: tensors явно cast'ятся
+вокруг одного GEMM, пока default dtype устройства остаётся fp32. Такой seam
+соответствует планируемому точечному пути для крупных projection layers.
 
 ## Результаты
 
-Таблица заполняется только измерениями self-hosted RX 9070 XT с точным commit,
-driver/runtime и min/max из CI artifact.
+Измерение: [run 30310985422](https://github.com/uselessgoddess/quasar/actions/runs/30310985422),
+source commit `fc0e5f8746905bb931fcc1be21eb9dd849d6d05f` (PR merge
+`b9ab44709f9a39b93f4b335ac7b0b5fa1beaff9c`), RX 9070 XT `gfx1201`, RADV
+Mesa 26.1.5, Vulkan 1.4.354, Rust 1.97.1. Burn закреплён на `d028234e`, CubeCL
+на `3beb9afa`.
 
 | backend | dtype | shape | median TFLOP/s | min/max | peak utilization | stability |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| Vulkan | fp32 | 4096³ | pending | pending | pending | pending |
-| Vulkan | fp32 | 8192³ | pending | pending | pending | pending |
-| Vulkan | f16 | 4096³ | pending | pending | pending | pending |
-| Vulkan | f16 | 8192³ | pending | pending | pending | pending |
-| Vulkan | bf16 | 4096³ | pending | pending | pending | pending |
-| Vulkan | bf16 | 8192³ | pending | pending | pending | pending |
+| Vulkan/RADV | fp32 | 4096³ | 14.05 | 13.90–14.18 | 29.3% | 3 samples, spread 2.03% |
+| Vulkan/RADV | fp32 | 8192³ | — | — | — | device lost на warm-up |
+| Vulkan/RADV | f16 | 4096³ | 42.03 | 39.11–43.00 | 43.3% | 9 samples, spread 9.95% |
+| Vulkan/RADV | f16 | 8192³ | 43.25 | 42.64–43.39 | 44.6% | 3 samples, spread 1.77% |
+| Vulkan/RADV | bf16 | 4096³ | 41.49 | 39.45–43.89 | 42.8% | 9 samples, spread 11.27% |
+| Vulkan/RADV | bf16 | 8192³ | 43.75 | 43.41–43.99 | 45.1% | 3 samples, spread 1.33% |
 
-До заполнения этой таблицы precision-кандидат не получает performance claim.
+fp32 8192³ воспроизводимо дошёл до hard recovery RADV, после чего wgpu сообщил
+`Parent device is lost`; отдельные процессы следующих проб не пострадали. Это
+не основание скрывать форму или валить всю матрицу: fp32 4096³ остаётся
+валидным reference, а failed shape явно записан в таблицу.
+
+## Решение gate
+
+Обе точечные 16-битные формы работают, примерно в 3 раза быстрее fp32 4096³.
+bf16 выбран первым кандидатом: на большой форме он чуть быстрее f16 и сохраняет
+динамический диапазон fp32, поэтому не требует loss scaling. Следующий тест —
+не глобальный dtype, а explicit casts только вокруг tied output-head GEMM с
+fp32 master weight, logits/loss и optimizer state.

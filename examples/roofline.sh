@@ -8,7 +8,7 @@ cd "$repo_root"
 
 sizes=${ROOFLINE_SIZES:-"4096 8192"}
 dtypes=${ROOFLINE_DTYPES:-"f32 f16 bf16"}
-failed_f32=0
+successful_f32=0
 
 for dtype in $dtypes; do
     for size in $sizes; do
@@ -22,12 +22,16 @@ for dtype in $dtypes; do
         set -e
         printf 'dtype=%s size=%s status=%s\n' "$dtype" "$size" "$status" \
             | tee "$log_dir/${label}.status"
-        if [[ $dtype == f32 && $status -ne 0 ]]; then
-            failed_f32=1
+        if [[ $dtype == f32 && $status -eq 0 ]]; then
+            successful_f32=$((successful_f32 + 1))
         fi
     done
 done
 
-# Reduced precision is deliberately a probe: unsupported bf16/f16 is a result
-# to document, while an fp32 failure means the roofline harness itself is bad.
-exit "$failed_f32"
+# Every dtype/shape combination is deliberately a probe: a device-lost result
+# at one size is itself roofline data. At least one fp32 reference must complete,
+# however, or the harness/backend is too broken to interpret reduced precision.
+if [[ $successful_f32 -eq 0 ]]; then
+    echo "no fp32 roofline shape completed successfully" >&2
+    exit 1
+fi

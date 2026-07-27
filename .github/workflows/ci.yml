@@ -115,32 +115,47 @@ jobs:
             runs/nano/*.blueprint
             runs/nano/frames/*.png
 
-  # Synchronized stepwise kernel A/B plus the production optimizer step on the
-  # maintainer's GPU. One complete step is discarded for fusion/autotune
-  # warm-up; every measured three-step window stays below one minute.
-  #
-  # Off by default: it and `blueprints` share one runner, and the kernel
-  # numbers only move when the kernels do. Run it from the Actions tab.
+  # Freeze the production optimizer-step baseline, then establish whether this
+  # exact Burn/CubeCL/Vulkan stack can reach RDNA4 matrix throughput at all.
+  # Precision work is gated on these numbers instead of a global dtype guess.
   gpu-benchmark:
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Record GPU runtime
         run: |
-          rocminfo | grep -m1 -E 'Name:.*gfx'
-          rocm-smi --showproductname --showmeminfo vram
-      # One binary isolates the old tensor paths, K4, K4+K1, and the fused
-      # rank-one scan before verifying that the full production batch fits.
-      - name: Vulkan stepwise kernel A/B and production recipe
-        run: examples/state_passing_ab.sh
-      - name: Preserve GPU benchmark logs
+          mkdir -p benchmark-logs
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            cargo -V
+            uname -a
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram --showclocks \
+              --showuse --showtemp --showpower
+            vulkaninfo --summary || true
+          } 2>&1 | tee benchmark-logs/environment.log
+      - name: P0 — production optimizer-step baseline
+        run: examples/performance_baseline.sh
+      - name: P0 — synchronized CubeCL kernel profile
+        working-directory: experiments/profile
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --model tiny-turbo --micro-batch 1 --accum 1
+          --warmup 1 --steps 3 --max-steps 3
+          --dtype f32 --ssd serial --checkpointing false --muon true
+          2>&1 | tee ../../benchmark-logs/profile.log
+      - name: P1 — dense GEMM roofline
+        run: examples/roofline.sh
+      - name: Preserve performance diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: state-passing-benchmark-logs
+          name: performance-diagnostics
           path: benchmark-logs/
 
   smoke:

@@ -5,9 +5,12 @@
 //! region. The first complete optimizer step is warm-up so CubeCL fusion and
 //! autotuning do not contaminate the measurement.
 
+mod bench_support;
+
 use std::time::Instant;
 
 use anyhow::Result;
+use bench_support::MeasurementSummary;
 use burn::prelude::*;
 use burn::tensor::{DeviceConfig, FloatDType};
 use clap::{Parser, ValueEnum};
@@ -28,6 +31,9 @@ struct Args {
     warmup: usize,
     #[arg(long, default_value_t = 3)]
     steps: usize,
+    /// Extend an unstable initial window to this many measured steps.
+    #[arg(long, default_value_t = 9)]
+    max_steps: usize,
     #[arg(long, value_enum, default_value_t = Dtype::F32)]
     dtype: Dtype,
     #[arg(long, value_enum, default_value_t = Ssd::Serial)]
@@ -98,6 +104,7 @@ fn main() -> Result<()> {
     assert!(args.micro_batch > 0, "micro-batch must be positive");
     assert!(args.accum > 0, "accum must be positive");
     assert!(args.steps > 0, "at least one measured step is required");
+    assert!(args.max_steps >= args.steps, "max-steps must be at least steps");
 
     let cfg = args.model.config();
     let mut base_device = Device::default();
@@ -135,27 +142,44 @@ fn main() -> Result<()> {
         println!("warmup {}/{} loss={loss:.4}", step + 1, args.warmup);
     }
 
-    let mut seconds = Vec::with_capacity(args.steps);
-    for step in 0..args.steps {
+    let mut seconds = Vec::with_capacity(args.max_steps);
+    for step in 0..args.max_steps {
         let started = Instant::now();
         let (next, loss) = optimizer_step(model, &mut optim, &input, &target, args.accum, &device)?;
         model = next;
         let elapsed = started.elapsed().as_secs_f64();
         let throughput = tokens_per_step as f64 / elapsed;
+        let planned_steps = if step < args.steps { args.steps } else { args.max_steps };
         println!(
             "measured {}/{} loss={loss:.4} seconds={elapsed:.3} throughput={throughput:.0} tok/s",
             step + 1,
-            args.steps
+            planned_steps
         );
         seconds.push(elapsed);
+
+        if seconds.len() == args.steps {
+            let initial = MeasurementSummary::new(&seconds);
+            if initial.needs_extended_window() && args.max_steps > args.steps {
+                println!(
+                    "measurement window extended from {} to {} steps: initial min/max spread {:.2}% exceeds 3%",
+                    args.steps, args.max_steps, initial.spread_percent
+                );
+            } else {
+                break;
+            }
+        }
     }
 
-    seconds.sort_by(f64::total_cmp);
-    let median = seconds[seconds.len() / 2];
-    let throughput = tokens_per_step as f64 / median;
+    let summary = MeasurementSummary::new(&seconds);
+    let throughput = tokens_per_step as f64 / summary.median;
+    let min_throughput = tokens_per_step as f64 / summary.max;
+    let max_throughput = tokens_per_step as f64 / summary.min;
     let tflops = throughput * 3.0 * cfg.flops_per_token() / 1e12;
     println!(
-        "result median_seconds={median:.3} throughput={throughput:.0} tok/s effective={tflops:.2} TFLOP/s"
+        "result samples={} median_seconds={:.3} min_seconds={:.3} max_seconds={:.3} \
+         spread={:.2}% throughput={throughput:.0} tok/s min_throughput={min_throughput:.0} \
+         max_throughput={max_throughput:.0} effective={tflops:.2} TFLOP/s",
+        summary.samples, summary.median, summary.min, summary.max, summary.spread_percent
     );
     Ok(())
 }
@@ -177,6 +201,26 @@ mod tests {
         assert!((flop_ratio - 1.0).abs() < 0.01, "FLOP ratio {flop_ratio}");
         assert!(activation_ratio < 0.81, "activation ratio {activation_ratio}");
         assert_eq!((wide.d_model, wide.n_layers, wide.attn_heads), (640, 12, 10));
+    }
+
+    #[test]
+    fn measurement_summary_exposes_unstable_three_step_windows() {
+        let summary = MeasurementSummary::new(&[1.00, 1.02, 1.04]);
+
+        assert_eq!(summary.samples, 3);
+        assert_eq!(summary.median, 1.02);
+        assert_eq!(summary.min, 1.00);
+        assert_eq!(summary.max, 1.04);
+        assert!(summary.spread_percent > 3.0);
+        assert!(summary.needs_extended_window());
+    }
+
+    #[test]
+    fn measurement_summary_accepts_a_stable_three_step_window() {
+        let summary = MeasurementSummary::new(&[1.00, 1.01, 1.02]);
+
+        assert!(summary.spread_percent < 3.0);
+        assert!(!summary.needs_extended_window());
     }
 }
 

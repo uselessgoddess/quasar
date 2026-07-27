@@ -76,7 +76,8 @@ burn-mamba branch uses a measured fused CubeCL rank-one scan by default and
 retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch.
 Select `--checkpointing true --ssd recalculated` if a larger override runs out
 of memory. Other presets retain the memory-saving defaults. See
-`docs/DESIGN.md` §3 and [`docs/KERNELS.md`](docs/KERNELS.md).
+`docs/DESIGN.md` §3, [`docs/KERNELS.md`](docs/KERNELS.md), and the
+[`docs/ROOFLINE.md`](docs/ROOFLINE.md) precision gate.
 
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —
 the last is the only figure comparable across tokenizers, and the one the design

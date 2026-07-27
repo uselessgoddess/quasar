@@ -202,13 +202,14 @@ refuses incomplete replicates and bootstraps within target and prompt strata
 instead of treating repeated generations of one specification as unrelated
 examples.
 
-`dag-v1` is separate for the same reason. The green-science generator has 32
-canonical route forms. Eight combinations of spacing, edge margin, upper-stage
-order and middle-stage order are reserved in full; the other 24 remain
-available to training. Four stable port/orientation prompts per held-out form
-make 32 conditions. Thus the DAG curve measures composition across unseen route
-combinations without either leaking their reference layouts or reserving the
-whole new capability out of the corpus.
+`dag-v2` is separate for the same reason. Green science and power switch each
+have 32 canonical route forms. The same eight combinations of spacing, edge
+margin and two target-specific route choices are reserved per target; the other
+24 remain available to training. Two stable port/orientation prompts per
+target/form make 32 conditions in total. Thus the DAG curve measures both
+geometric composition and transfer to a second recipe graph without leaking
+reference layouts, reserving either capability out of the corpus, or doubling
+the previous generation budget.
 
 ## What the corpus is
 
@@ -231,7 +232,7 @@ to invent them; a mis-remembered ratio produces a factory that looks perfect and
 starves, and there is no reason to buy a probabilistic version of a table that
 is already exact.
 
-A chain is not always a line. The live `plan.modules` catalogue has 30 targets.
+A chain is not always a line. The live `plan.modules` catalogue has 31 targets.
 Five branch: the last machine wants two items that both have to be made, which a
 run of stacked bands cannot deliver — a belt hands its product downstream and
 nowhere else, so the first of the two would sail past the row that wants it.
@@ -240,23 +241,23 @@ and `synth` draws them as two bottom-aligned columns dropping onto one belt with
 that stage beneath it. Which generic layout a target gets is derived from the
 plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
 
-The thirtieth is deliberately less generic. Green science is a six-recipe
+The last two are deliberately less generic. Green science is a six-recipe
 diamond: gears feed both middle branches, and the inserter needs circuits,
 gears, and iron plate, one item more than a belt has lanes. Its `factory` layout
 therefore has two external iron belts, a shared circuit-and-gear belt, and an
 underground crossing before the two products meet at the science assembler.
-That concrete generator is the first multi-belt DAG milestone; another arbitrary
-DAG does not enter the catalogue merely because the arithmetic planner can count
-it. The same conveyor graph is drawn in 32 canonical forms: four upstream
-spacings, two edge margins and independent swaps of the two upper and two middle
-recipe stages. Rotations, reflections and belt tiers do not count toward those
-32 because corpus canonicalisation already identifies them. The pinned
-`module-v1` baseline remains the preceding 29-target task, while `dag-v1`
-measures the new capability on held-out route combinations.
+Power switch is the second DAG: cable feeds both circuits and a three-ingredient
+final assembler. Its shared iron-and-cable belt and separate circuit belt test
+the same hard constraints with a different topology. Each conveyor graph is
+drawn in 32 canonical forms: four spacings, two edge margins and two independent
+target-specific route choices. Rotations, reflections and belt tiers do not
+count toward those 32 because corpus canonicalisation already identifies them.
+The pinned `module-v1` baseline remains the preceding 29-target task, while
+`dag-v2` measures both capabilities on held-out route combinations.
 
 ![Green science multi-belt factory](../docs/screenshots/green-science.png)
 
-![Eight held-out green-science route combinations](../docs/screenshots/dag-forms.png)
+![Two DAGs over eight held-out route combinations](../docs/screenshots/dag-v2-forms.png)
 
 Two decisions matter more than the rest:
 
@@ -277,15 +278,15 @@ generator that has run out of things to say costs a draw and adds nothing, and
 `experiments/saturation.py` says which ones those are. `build --module-weight`
 moves that share without touching the proportions among the rest.
 
-A 20,000-draw build measures 10,599 distinct layouts, 66,548 documents and
-14.42M training tokens at a 739-token vocabulary; 4,353 of the layouts are
-modules. The other 9,401 draws were forms of a layout already kept, and 13,452
-of the expanded documents came out byte-identical to one already written. A
-further 618 draws matched a canonical benchmark holdout and were excluded from
-both shards — drawing from eleven generators collides, and the manifest says by
-how much. The
-6,000 draws `examples/factorio.sh` defaults to give 4,350 layouts and 4.74M
-tokens, already more than a 3.6M-parameter model gets through in half an hour.
+The preceding `dag-v1` 20,000-draw build measured 10,599 distinct layouts,
+66,548 documents and 14.42M training tokens at a 739-token vocabulary; 4,353 of
+the layouts were modules. The other 9,401 draws were forms of a layout already
+kept, and 13,452 expanded documents came out byte-identical to one already
+written. A further 618 draws matched a canonical benchmark holdout and were
+excluded from both shards — drawing from eleven generators collides, and the
+manifest says by how much. With both `dag-v2` targets, the 6,000 draws
+`examples/factorio.sh` defaults to give 4,336 layouts and 4.77M tokens, already
+more than a 3.6M-parameter model gets through in half an hour.
 
 Building it is pure Python and runs before the GPU gets to do anything, so what
 it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and

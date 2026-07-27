@@ -753,12 +753,13 @@ class Layout:
 
 @dataclass(frozen=True)
 class FactoryForm:
-    """One non-symmetric routing of the green-science recipe DAG.
+    """One non-symmetric routing of an explicitly supported recipe DAG.
 
     Rotations and reflections are useful documents, but they are still one
     canonical layout.  These four axes survive canonicalisation: the space
-    between the upstream machines, spare belt at the port edge, and which
-    recipe occupies each of the two upstream and downstream slots.
+    between machines, spare belt at the port edge, and two DAG-specific route
+    choices.  Green science uses the booleans as sibling orders; power switch
+    uses them as cable-machine offset and circuit/final order.
     """
 
     spacing: int
@@ -772,14 +773,23 @@ class FactoryForm:
         middle = "belt-first" if self.middle_swapped else "inserter-first"
         return f"space-{self.spacing}-margin-{self.margin}-{upstream}-{middle}"
 
+    def name_for(self, product: str) -> str:
+        """A route label whose booleans describe this target's actual geometry."""
+        if product == "power-switch":
+            cable = "cable-offset" if self.upstream_swapped else "cable-edge"
+            downstream = "circuit-right" if self.middle_swapped else "circuit-left"
+            return f"space-{self.spacing}-margin-{self.margin}-{cable}-{downstream}"
+        return self.name
+
     @classmethod
     def draw(cls, rng: random.Random) -> FactoryForm:
         return rng.choice(FACTORY_FORMS)
 
 
-# Thirty-two canonical forms of one semantic DAG.  A 20k-design corpus draws
-# roughly three hundred green-science factories at the default mixture, enough
-# to cover this set repeatedly without reducing it to a memorised pair.
+# Thirty-two canonical forms for each explicitly supported semantic DAG. A
+# 20k-design corpus draws roughly three hundred examples of each factory at the
+# default mixture, enough to cover either set repeatedly without reducing it to
+# a memorised pair.
 FACTORY_FORMS = tuple(
     FactoryForm(spacing, margin, upstream_swapped, middle_swapped)
     for spacing in range(4)
@@ -792,12 +802,13 @@ FACTORY_FORMS = tuple(
 def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     """A closed module: inputs on the edge, a recipe chain inside, one output.
 
-    This is the layout the whole planner exists for, and it comes in the two
-    shapes `plan.modules` catalogues. Both are built out of the same band — a
-    belt, a row of inserters facing down into a row of machines, and a row of
-    inserters facing down out of them — and differ only in how the bands are
-    arranged: `_stacked` runs them down one column, `_forked` runs two columns
-    side by side into a machine that consumes both.
+    This is the layout the whole planner exists for. The generic `stack` and
+    `fork` shapes are built out of the same band — a belt, a row of inserters
+    facing down into a row of machines, and a row of inserters facing down out
+    of them. `_stacked` runs the bands down one column and `_forked` runs two
+    columns side by side into a machine that consumes both. Explicit `factory`
+    targets route cross-edges and additional input belts that those two generic
+    geometries cannot express.
 
     Raw ingredients enter at the upstream end of whichever band needs them, which
     is why `plan.modules` rejects a chain whose stage wants more raws than a belt
@@ -993,6 +1004,12 @@ def _factory(
     """
     del layout
     if (
+        target.product == "power-switch"
+        and target.supply == ("iron-plate", "copper-plate")
+        and target.depth == 3
+    ):
+        return _power_switch_factory(rng, data, target, form)
+    if (
         target.product != "logistic-science-pack"
         or target.supply != ("iron-plate", "copper-plate")
         or target.depth != 4
@@ -1088,6 +1105,91 @@ def _factory(
         Port("out", "logistic-science-pack", width - 1, 24, "e"),
     ]
     return canvas.build("logistic-science-pack factory"), ports, unit.steps()
+
+
+def _power_switch_factory(
+    rng: random.Random,
+    data: Data,
+    target: planner.Module,
+    form: FactoryForm,
+) -> tuple[Blueprint, list[Port], tuple]:
+    """A compact second DAG: shared cable into circuits and the final machine.
+
+    Iron and freshly made cable share the upper belt.  Both downstream machines
+    draw from it, while the circuit machine sends its product along a second
+    belt into the power-switch assembler.  The final stage therefore receives
+    its three ingredients from two belts without mixing three item types on one.
+
+    The same four held-out axes remain meaningful without copying green
+    science's topology: spacing separates the downstream machines, margin
+    changes the output run, ``upstream_swapped`` offsets the cable stage, and
+    ``middle_swapped`` reverses circuit/final order while the cable stage and
+    input ports stay fixed.  Reversing only that dependency belt is not a
+    rotation or reflection of the whole factory.
+    """
+    unit = planner.solve(data, target.product, target.supply, rate=1e-9, depth=3)
+    stages = {stage.product: stage for stage in unit.stages}
+    tier = _tier(rng)
+    belt = BELTS[tier]
+    inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
+    canvas = Canvas.new(data)
+
+    cable_x = 3 if form.upstream_swapped else 0
+    left = 7 + (form.margin if form.middle_swapped else 0)
+    right = left + 5 + form.spacing
+    circuit_x, final_x = (right, left) if form.middle_swapped else (left, right)
+
+    # Copper enters the cable assembler. Its product joins iron on the shared
+    # two-lane belt below and reaches both later stages.
+    canvas.line(belt, 0, 0, cable_x + 3, EAST)
+    canvas.place(MODULE_POLE, cable_x + 3, 0)
+    cable = stages["copper-cable"]
+    canvas.place(inserter, cable_x, 1, SOUTH)
+    canvas.place(cable.machine, cable_x, 2, recipe=cable.recipe)
+    canvas.place(inserter, cable_x, 5, SOUTH)
+    shared_end = right + 3
+    canvas.line(belt, 0, 6, shared_end + 1, EAST)
+    canvas.place(MODULE_POLE, shared_end + 1, 6)
+
+    # Circuit and final assembler both take cable and iron from above.
+    circuit = stages["electronic-circuit"]
+    final = stages["power-switch"]
+    for stage, x in ((circuit, circuit_x), (final, final_x)):
+        canvas.place(inserter, x, 7, SOUTH)
+        canvas.place(stage.machine, x, 8, recipe=stage.recipe)
+
+    # Circuit travels back or forward along its own belt into the final stage.
+    direction = WEST if circuit_x > final_x else EAST
+    canvas.place(inserter, circuit_x, 11, SOUTH)
+    canvas.line(belt, circuit_x, 12, abs(circuit_x - final_x) + 1, direction)
+    canvas.place(inserter, final_x, 11, NORTH)
+    stop = final_x - 1 if direction == WEST else final_x + 1
+    canvas.place(MODULE_POLE, stop, 12)
+
+    # Export away from the other downstream machine. Margin lengthens this
+    # route without changing any recipe or port semantics.
+    if final_x < circuit_x:
+        canvas.place(inserter, final_x - 1, 9, WEST)
+        canvas.line(belt, final_x - 2, 9, final_x - 1, WEST)
+        output = Port("out", target.product, 0, 9, "w")
+    else:
+        canvas.place(inserter, final_x + 3, 9, EAST)
+        output_length = 2 + form.margin
+        canvas.line(belt, final_x + 4, 9, output_length, EAST)
+        output = Port("out", target.product, final_x + 3 + output_length, 9, "e")
+
+    # Two connected substations cover every machine and inserter while leaving
+    # both item belts unobstructed.
+    centre = (left + right) // 2
+    canvas.place("substation", cable_x + 4, 2)
+    canvas.place("substation", centre, 13)
+
+    ports = [
+        Port("in", "copper-plate", 0, 0, "w"),
+        Port("in", "iron-plate", 0, 6, "w"),
+        output,
+    ]
+    return canvas.build("power-switch factory"), ports, unit.steps()
 
 
 @dataclass(frozen=True)

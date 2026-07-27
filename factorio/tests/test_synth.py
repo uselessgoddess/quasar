@@ -138,29 +138,32 @@ def test_every_module_draw_makes_the_item_it_advertises():
     assert products - {module.product for module in FORKS}  # and stacks too
 
 
-def test_green_science_factory_routes_the_diamond_and_three_item_stage():
-    assert len(FACTORIES) == 1
-    target = FACTORIES[0]
-    assert target.product == "logistic-science-pack"
-    for seed in range(12):
-        blueprint, spec = synth.module_for(random.Random(seed), DATA, target)
-        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
-        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
-        assert (report.mixed, report.leaks) == (0, 0)
-        assert len([port for port in spec.inputs() if port.item == "iron-plate"]) >= 2
+def test_factories_route_shared_intermediates_and_three_item_stages():
+    assert {target.product for target in FACTORIES} == {
+        "logistic-science-pack",
+        "power-switch",
+    }
+    for target in FACTORIES:
+        for seed in range(12):
+            blueprint, spec = synth.module_for(random.Random(seed), DATA, target)
+            report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+            assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+            assert (report.mixed, report.leaks) == (0, 0)
+            if target.product == "logistic-science-pack":
+                assert len([port for port in spec.inputs() if port.item == "iron-plate"]) >= 2
 
 
-def test_factory_target_has_many_geometrically_distinct_training_layouts():
-    """A DAG must be a family of routes, not two templates seen under rotations."""
-    target = FACTORIES[0]
-    layouts = set()
-    for seed, form in enumerate(synth.FACTORY_FORMS):
-        blueprint, spec = synth.module_for(random.Random(seed), DATA, target, factory_form=form)
-        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
-        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
-        assert (report.mixed, report.leaks) == (0, 0)
-        layouts.add(augment.canonical(blueprint, DATA))
-    assert len(layouts) == len(synth.FACTORY_FORMS) == 32
+def test_factory_targets_have_many_geometrically_distinct_training_layouts():
+    """Each DAG must be a family of routes, not templates seen under rotations."""
+    for target in FACTORIES:
+        layouts = set()
+        for seed, form in enumerate(synth.FACTORY_FORMS):
+            blueprint, spec = synth.module_for(random.Random(seed), DATA, target, factory_form=form)
+            report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+            assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+            assert (report.mixed, report.leaks) == (0, 0)
+            layouts.add(augment.canonical(blueprint, DATA))
+        assert len(layouts) == len(synth.FACTORY_FORMS) == 32
 
 
 def test_a_branching_module_is_two_columns_and_not_a_deeper_stack():

@@ -159,8 +159,12 @@ def test_the_fixed_dag_benchmark_covers_every_working_holdout_form(corpus):
     records = dataset.read_prompts(out / "dag-benchmark.jsonl")
     assert len(records) == stats.dag_benchmark_prompts == benchmark.DAG_SIZE
     assert {record["benchmark_layout"] for record in records} == {
-        form.name for form in benchmark.DAG_FORMS
+        f"{product}:{form.name_for(product)}"
+        for target in benchmark.DAG_TARGETS
+        for product in (target.split("|", 1)[0],)
+        for form in benchmark.DAG_FORMS
     }
+    assert {record["benchmark_target"] for record in records} == set(benchmark.DAG_TARGETS)
     for record in records:
         assert record["benchmark"] == benchmark.DAG_VERSION
         assert record["shape"] == "factory"

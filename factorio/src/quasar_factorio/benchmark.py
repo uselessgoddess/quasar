@@ -15,9 +15,10 @@ The reference blueprints are not training examples.  :mod:`dataset` reserves
 their canonical layouts before writing either shard, which gives the benchmark
 the same design-level holdout guarantee as the ordinary validation split.
 
-``dag-v1`` is the companion measurement for the first multi-belt recipe graph:
-32 prompts over eight held-out green-science route combinations.  It stays
-separate so the pinned module baseline does not move when DAG data changes.
+``dag-v2`` is the companion measurement for two multi-belt recipe graphs:
+32 prompts over the same eight held-out route combinations for green science
+and power switch.  It stays separate so the pinned module baseline does not
+move when DAG data changes.
 """
 
 from __future__ import annotations
@@ -36,12 +37,15 @@ from .grammar import Spec
 from .prototypes import Data, load
 
 VERSION = "module-v1"
-DAG_VERSION = "dag-v1"
+DAG_VERSION = "dag-v2"
 DEFAULT_SIZE = 64
 DAG_SIZE = 32
-DAG_VARIANTS = 4
+DAG_VARIANTS = 2
 DEFAULT_SEED = 19
-DAG_TARGET = "logistic-science-pack|iron-plate,copper-plate|d4|factory"
+DAG_TARGETS = (
+    "logistic-science-pack|iron-plate,copper-plate|d4|factory",
+    "power-switch|iron-plate,copper-plate|d3|factory",
+)
 
 # The benchmark is a versioned measurement, not a view of whatever happens to
 # be in the current generator catalogue.  Keep the exact issue-19 baseline
@@ -213,66 +217,78 @@ def dag_cases(
     *,
     seed: int = DEFAULT_SEED,
 ) -> tuple[Case, ...]:
-    """Build fixed prompts over held-out green-science route combinations.
+    """Build fixed prompts over held-out route combinations for two DAGs.
 
     ``module-v1`` remains pinned to its original 29 pre-DAG targets.  This
-    companion benchmark asks the narrower question introduced by the new
-    training data: can the model connect the same diamond recipe graph in eight
-    held-out combinations of sibling order, spacing, and edge margin? Four
-    port/orientation prompts per layout make 32 fixed conditions.
+    companion benchmark asks whether the model connects two different recipe
+    graphs in eight held-out combinations of route order, spacing, and edge
+    margin. Two port/orientation prompts per target/layout preserve the existing
+    32-condition generation budget.
     """
     data = data or load()
     available = {target_id(target): target for target in plan.modules(data)}
-    if DAG_TARGET not in available:
-        raise ValueError(f"{DAG_VERSION} target is no longer available: {DAG_TARGET}")
-    target = available[DAG_TARGET]
-    name = target_id(target)
+    missing = [name for name in DAG_TARGETS if name not in available]
+    if missing:
+        raise ValueError(f"{DAG_VERSION} targets are no longer available: {', '.join(missing)}")
     found: list[Case] = []
     keys: set[str] = set()
     prompts: set[str] = set()
-    for form in DAG_FORMS:
-        layout_key: str | None = None
-        for variant in range(DAG_VARIANTS):
-            for attempt in range(100):
-                draw_seed = _seed(f"{DAG_VERSION}:{seed}:{name}:{form.name}:{variant}:{attempt}")
-                rng = random.Random(draw_seed)
-                blueprint, spec = synth.module_for(rng, data, target, factory_form=form)
-                reference = grammar.serialise(blueprint, data, spec)
-                key = augment.canonical(blueprint, data)
-                prompt = grammar.prompt(spec)
-                if prompt in prompts:
-                    continue
-                if layout_key is None:
-                    if key in keys:
-                        continue
-                    keys.add(key)
-                    layout_key = key
-                elif key != layout_key:
-                    raise ValueError(f"{form.name} is not one canonical layout")
-                report = validate.grade(reference, data)
-                if not (
-                    report.valid
-                    and report.delivers == report.fed == report.working == 1.0
-                    and report.mixed == report.leaks == 0
-                ):
-                    raise ValueError(f"benchmark reference is not a working DAG: {form.name}")
-                prompts.add(prompt)
-                found.append(
-                    Case(
-                        prompt_id=f"{name}|{form.name}|v{variant}",
-                        target_id=name,
-                        variant=variant,
-                        shape=target.shape,
-                        blueprint=blueprint,
-                        spec=spec,
-                        reference=reference,
-                        benchmark=DAG_VERSION,
-                        layout=form.name,
+    for name in DAG_TARGETS:
+        target = available[name]
+        for form in DAG_FORMS:
+            layout_name = form.name_for(target.product)
+            layout_key: str | None = None
+            for variant in range(DAG_VARIANTS):
+                for attempt in range(100):
+                    draw_seed = _seed(
+                        f"{DAG_VERSION}:{seed}:{name}:{layout_name}:{variant}:{attempt}"
                     )
-                )
-                break
-            else:  # pragma: no cover - the catalogue no longer supports the measurement
-                raise ValueError(f"could not draw a unique DAG prompt for {form.name} v{variant}")
+                    rng = random.Random(draw_seed)
+                    blueprint, spec = synth.module_for(rng, data, target, factory_form=form)
+                    reference = grammar.serialise(blueprint, data, spec)
+                    key = augment.canonical(blueprint, data)
+                    prompt = grammar.prompt(spec)
+                    if prompt in prompts:
+                        continue
+                    if layout_key is None:
+                        if key in keys:
+                            continue
+                        keys.add(key)
+                        layout_key = key
+                    elif key != layout_key:
+                        raise ValueError(
+                            f"{target.product}:{layout_name} is not one canonical layout"
+                        )
+                    report = validate.grade(reference, data)
+                    if not (
+                        report.valid
+                        and report.delivers == report.fed == report.working == 1.0
+                        and report.mixed == report.leaks == 0
+                    ):
+                        raise ValueError(
+                            "benchmark reference is not a working DAG: "
+                            f"{target.product}:{layout_name}"
+                        )
+                    prompts.add(prompt)
+                    found.append(
+                        Case(
+                            prompt_id=f"{name}|{layout_name}|v{variant}",
+                            target_id=name,
+                            variant=variant,
+                            shape=target.shape,
+                            blueprint=blueprint,
+                            spec=spec,
+                            reference=reference,
+                            benchmark=DAG_VERSION,
+                            layout=f"{target.product}:{layout_name}",
+                        )
+                    )
+                    break
+                else:  # pragma: no cover - the catalogue no longer supports the measurement
+                    raise ValueError(
+                        "could not draw a unique DAG prompt for "
+                        f"{target.product}:{layout_name} v{variant}"
+                    )
     if len(found) != DAG_SIZE:
         raise ValueError(f"{DAG_VERSION} expected {DAG_SIZE} prompts, found {len(found)}")
     return tuple(found)

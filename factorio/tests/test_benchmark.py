@@ -63,24 +63,27 @@ def test_the_benchmark_is_byte_stable_for_the_same_version_and_seed():
     assert first == second
 
 
-def test_dag_benchmark_covers_every_held_out_factory_form():
+def test_dag_benchmark_covers_every_held_out_form_for_both_factories():
     selected = benchmark.dag_cases(DATA)
     assert len(selected) == benchmark.DAG_SIZE
-    assert {case.layout for case in selected} == {form.name for form in benchmark.DAG_FORMS}
-    assert len({augment.canonical(case.blueprint, DATA) for case in selected}) == len(
-        benchmark.DAG_FORMS
+    assert {case.target_id for case in selected} == set(benchmark.DAG_TARGETS)
+    assert {case.layout for case in selected} == {
+        f"{product}:{form.name_for(product)}"
+        for target in benchmark.DAG_TARGETS
+        for product in (target.split("|", 1)[0],)
+        for form in benchmark.DAG_FORMS
+    }
+    assert len({augment.canonical(case.blueprint, DATA) for case in selected}) == (
+        len(benchmark.DAG_TARGETS) * len(benchmark.DAG_FORMS)
     )
     assert len({case.record()["prompt"] for case in selected}) == len(selected)
     assert all(case.benchmark == benchmark.DAG_VERSION for case in selected)
-    assert len(synth.FACTORY_FORMS) - len(benchmark.DAG_FORMS) == 24
+    assert benchmark.DAG_VARIANTS == 2
 
 
-def test_dag_holdout_leaves_twenty_four_route_forms_for_training():
-    target = next(
-        target
-        for target in plan.modules(DATA)
-        if benchmark.target_id(target) == benchmark.DAG_TARGET
-    )
+@pytest.mark.parametrize("name", benchmark.DAG_TARGETS)
+def test_dag_holdout_leaves_twenty_four_route_forms_per_target_for_training(name):
+    target = next(target for target in plan.modules(DATA) if benchmark.target_id(target) == name)
     reserved = benchmark.reserved(benchmark.dag_cases(DATA), DATA)
     available = {
         augment.canonical(
@@ -90,7 +93,6 @@ def test_dag_holdout_leaves_twenty_four_route_forms_for_training():
         for seed, form in enumerate(synth.FACTORY_FORMS)
         if form not in benchmark.DAG_FORMS
     }
-    assert len(reserved) == len(benchmark.DAG_FORMS) == 8
     assert len(available) == 24
     assert not reserved & available
 
@@ -98,7 +100,8 @@ def test_dag_holdout_leaves_twenty_four_route_forms_for_training():
 def test_a_perfect_dag_run_reports_every_layout(repeated_dag_samples):
     result = benchmark.evaluate(repeated_dag_samples, DATA, iterations=20)
     assert (result["samples"], result["prompts"], result["factory_prompts"]) == (64, 32, 32)
-    assert len(result["by_layout"]) == 8
+    assert len(result["by_target"]) == 2
+    assert len(result["by_layout"]) == 16
     assert result["summary"]["mean_flow"] == 1.0
 
 

@@ -371,8 +371,9 @@ def modules(
     *Factory* is deliberately concrete rather than a claim that arbitrary DAG
     placement is solved. Green science is the first admitted example: gears are
     shared by the inserter and transport-belt branches, while the inserter needs
-    circuits, gears, and iron plate. Its generator routes that diamond and the
-    three-item stage with two external iron belts plus a shared two-lane belt.
+    circuits, gears, and iron plate. Power switch is the second: cable feeds both
+    circuits and the final three-ingredient stage. Their generators route those
+    cross-edges explicitly instead of pretending the generic stack can.
 
     Every boundary from two stages up to `depth` is offered, because they are
     different modules and not different qualities of the same one: a player who
@@ -397,21 +398,23 @@ def modules(
             used = _used(unit)
             out.setdefault((product, used), Module(product, used, level, shape))
 
-    # The first factory-sized layout is deliberately explicit.  Its plan has
-    # both obstacles the one-belt stack and disjoint fork cannot express:
-    # gears feed two later stages (a diamond), and the inserter stage consumes
-    # three item types.  ``synth._factory`` gives it two iron input belts and
-    # routes the shared intermediates sideways.  Keeping this gate beside the
-    # generic catalogue filters makes the supported geometry honest: another
-    # arbitrary DAG does not enter training merely because the planner can
-    # count it.
-    if depth >= 4 and lanes >= 2:
+    # Factory-sized layouts are deliberately explicit.  Their plans contain
+    # cross-edges and three-item stages that the one-belt stack and disjoint
+    # fork cannot express.  Keeping this gate beside the generic filters makes
+    # the supported geometry honest: an arbitrary DAG does not enter training
+    # merely because the planner can count it.
+    if lanes >= 2:
         supply = ("iron-plate", "copper-plate")
-        green = solve(data, "logistic-science-pack", supply, rate=1e-9, depth=4)
-        if all(data.entities[stage.machine].takes_recipe for stage in green.stages):
-            out[("logistic-science-pack", supply)] = Module(
-                "logistic-science-pack", supply, 4, "factory"
-            )
+        factories = (
+            ("power-switch", 3),
+            ("logistic-science-pack", 4),
+        )
+        for product, required_depth in factories:
+            if depth < required_depth:
+                continue
+            unit = solve(data, product, supply, rate=1e-9, depth=required_depth)
+            if all(data.entities[stage.machine].takes_recipe for stage in unit.stages):
+                out[(product, supply)] = Module(product, supply, required_depth, "factory")
     return tuple(out.values())
 
 

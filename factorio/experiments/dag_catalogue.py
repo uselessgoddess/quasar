@@ -4,16 +4,20 @@ The arithmetic planner can solve more recipes than the current stack/fork/factor
 layouts can place.  This experiment makes that gap explicit and also measures
 whether each admitted factory target is a real family of canonical geometries.
 
-Run:  PYTHONPATH=src python3 experiments/dag_catalogue.py [draws] [candidates]
+Run:
+
+    PYTHONPATH=src python3 experiments/dag_catalogue.py [draws] [candidates]
+    PYTHONPATH=src python3 experiments/dag_catalogue.py --sheet ../docs/screenshots/dag-v2-forms.png
 """
 
 from __future__ import annotations
 
+import argparse
+import pathlib
 import random
-import sys
 from collections import Counter
 
-from quasar_factorio import augment, plan, prototypes, synth
+from quasar_factorio import augment, benchmark, plan, prototypes, render, synth
 
 
 def _features(unit: plan.Plan) -> tuple[int, int, int]:
@@ -40,8 +44,13 @@ def _features(unit: plan.Plan) -> tuple[int, int, int]:
 
 
 def main() -> int:
-    draws = int(sys.argv[1]) if len(sys.argv) > 1 else 64
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+    parser = argparse.ArgumentParser()
+    parser.add_argument("draws", nargs="?", type=int, default=64)
+    parser.add_argument("candidates", nargs="?", type=int, default=20)
+    parser.add_argument("--sheet", type=pathlib.Path)
+    args = parser.parse_args()
+    draws = args.draws
+    limit = args.candidates
     data = prototypes.load()
     admitted = {(module.product, module.supply): module for module in plan.modules(data)}
 
@@ -85,6 +94,30 @@ def main() -> int:
     for shared, arity, stages, product, depth, supply in ranked[:limit]:
         print(f"{product:<30} {stages:>3} {shared:>3} {arity:>3} {depth:>3}  {','.join(supply)}")
     print(f"\nshowing {min(limit, len(ranked))} of {len(ranked)} candidates")
+    if args.sheet is not None:
+        cards = []
+        for target in admitted.values():
+            if target.shape != "factory":
+                continue
+            for index, form in enumerate(benchmark.DAG_FORMS):
+                blueprint, _ = synth.module_for(
+                    random.Random(index),
+                    data,
+                    target,
+                    factory_form=form,
+                )
+                cards.append(
+                    render.card(
+                        blueprint,
+                        data,
+                        title=target.product,
+                        lines=(form.name_for(target.product),),
+                        accent=render.GOOD,
+                    )
+                )
+        args.sheet.parent.mkdir(parents=True, exist_ok=True)
+        args.sheet.write_bytes(render.sheet(cards, columns=len(benchmark.DAG_FORMS)).png())
+        print(f"wrote {len(cards)} held-out forms to {args.sheet}")
     return 0
 
 

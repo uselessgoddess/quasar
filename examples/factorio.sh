@@ -31,8 +31,9 @@ prompts=${PROMPTS:-24}
 # estimate of sampling variance.  They share one checkpoint load, so repeats
 # are much cheaper than separate generate invocations.
 benchmark_repeats=${BENCHMARK_REPEATS:-2}
-# The DAG curve needs coverage of all 32 fixed prompts more than duplicate
-# sampling. One draw per prompt keeps the extra pass inside the CI GPU budget.
+# The DAG curve needs coverage of all 32 fixed prompts (two targets × eight
+# held-out routes × two prompt variants) more than duplicate sampling. One draw
+# per prompt keeps the extra pass inside the CI GPU budget.
 dag_benchmark_repeats=${DAG_BENCHMARK_REPEATS:-1}
 backend=${BACKEND:-}
 # Human blueprints, if a cache has been fetched — 20,000 weighted draws are
@@ -131,9 +132,10 @@ for checkpoint in "$out"/step_*; do
         --out "$out/benchmark-samples-$step.jsonl" \
         --tokens 460 --temperature 0.7 --top-k 20 \
         --repeats "$benchmark_repeats"
-    # A separate held-out curve for one semantic diamond DAG: four prompts over
-    # each of eight unseen route combinations. Keeping it out of module-v1
-    # preserves that benchmark's baseline.
+    # A separate held-out curve for two semantic DAGs: two prompts over each of
+    # eight unseen route combinations per target. Keeping it out of module-v1
+    # preserves that benchmark's baseline without increasing the old 32-prompt
+    # generation budget.
     "${quasar[@]}" generate "$checkpoint" \
         --tokenizer "$corpus/tokenizer.json" \
         --prompts "$corpus/dag-benchmark.jsonl" \
@@ -243,7 +245,7 @@ pathlib.Path(sys.argv[4]).write_text(ranked[0]["text"] if ranked else "")
 modules = sorted(benchmark, key=rank, reverse=True)
 pathlib.Path(sys.argv[5]).write_text(modules[0]["text"] if modules else "")
 
-# And over the held-out forms of the green-science DAG.
+# And over the held-out forms of both explicit recipe DAGs.
 dags = sorted(dag, key=rank, reverse=True)
 pathlib.Path(sys.argv[6]).write_text(dags[0]["text"] if dags else "")
 PY

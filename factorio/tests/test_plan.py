@@ -147,7 +147,7 @@ def test_every_catalogued_module_survives_its_own_filters():
             assert unit.raws_of(unit.stages[-1]) == ()
         else:
             assert module.shape == "factory", module
-            assert module.product == "logistic-science-pack"
+            assert module.product in {"logistic-science-pack", "power-switch"}
 
 
 def test_the_catalogue_holds_at_least_five_branching_chains():
@@ -192,6 +192,22 @@ def test_green_science_gets_a_factory_layout_for_both_hard_reasons():
         module
         for module in plan.modules(DATA, depth=4)
         if module.product == "logistic-science-pack" and module.supply == PLATES
+    )
+    assert target.shape == "factory"
+
+
+def test_power_switch_gets_the_second_explicit_factory_layout():
+    """The next DAG shares cable and has a three-ingredient final stage."""
+    unit = plan.solve(DATA, "power-switch", PLATES, rate=1e-9, depth=3)
+    cable, circuit, final = unit.stages
+    assert cable.product == "copper-cable"
+    assert set(circuit.ingredients) == {"iron-plate", "copper-cable"}
+    assert set(final.ingredients) == {"iron-plate", "copper-cable", "electronic-circuit"}
+    assert plan.fork(unit) is None
+    target = next(
+        module
+        for module in plan.modules(DATA, depth=4)
+        if module.product == "power-switch" and module.supply == PLATES
     )
     assert target.shape == "factory"
 

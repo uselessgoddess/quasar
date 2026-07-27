@@ -152,6 +152,18 @@ python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
 python -m quasar_factorio.cli benchmark \
     runs/nano/benchmark-samples-000400.jsonl --json runs/nano/benchmark.json
 
+# Prevent malformed/overlapping/off-zone/illegal placements while sampling
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json --constraints corpus/constraints.json \
+    --prompts corpus/benchmark.jsonl --out runs/nano/constrained.jsonl --tokens 460
+
+# Or spend two unconstrained attempts per prompt and accept the first hard-valid
+# one; then report quality together with the actual 128-vs-64 model-sample cost
+python -m quasar_factorio.cli select-rejections \
+    runs/nano/benchmark-samples-000400.jsonl runs/nano/rejected.jsonl
+python -m quasar_factorio.cli compare-inference \
+    runs/nano/constrained.jsonl runs/nano/rejected.jsonl --json runs/nano/inference.json
+
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
     --grade runs/nano/benchmark-samples-*.jsonl
 
@@ -200,14 +212,26 @@ to invent them; a mis-remembered ratio produces a factory that looks perfect and
 starves, and there is no reason to buy a probabilistic version of a table that
 is already exact.
 
-A chain is not always a line. `plan.modules` catalogues 29 targets, and five of
-them branch: the last machine wants two items that both have to be made, which a
+A chain is not always a line. The live `plan.modules` catalogue has 30 targets.
+Five branch: the last machine wants two items that both have to be made, which a
 run of stacked bands cannot deliver — a belt hands its product downstream and
 nowhere else, so the first of the two would sail past the row that wants it.
 `plan.fork` splits such a plan into two branches converging on its last stage,
 and `synth` draws them as two bottom-aligned columns dropping onto one belt with
-that stage beneath it. Which of the two layouts a target gets is derived from
-the plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
+that stage beneath it. Which generic layout a target gets is derived from the
+plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
+
+The thirtieth is deliberately less generic. Green science is a six-recipe
+diamond: gears feed both middle branches, and the inserter needs circuits,
+gears, and iron plate, one item more than a belt has lanes. Its `factory` layout
+therefore has two external iron belts, a shared circuit-and-gear belt, and an
+underground crossing before the two products meet at the science assembler.
+That concrete generator is the first multi-belt DAG milestone; another arbitrary
+DAG does not enter the catalogue merely because the arithmetic planner can count
+it. The pinned `module-v1` baseline remains the preceding 29-target task, so the
+new capability cannot silently make the comparison easier or harder.
+
+![Green science multi-belt factory](../docs/screenshots/green-science.png)
 
 Two decisions matter more than the rest:
 

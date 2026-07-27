@@ -111,6 +111,8 @@ fi
 stage generate
 # Every checkpoint, not just the last one: the grade curve over training is the
 # plot that says whether it is learning to build or learning to copy.
+inference_checkpoint=
+inference_samples=
 for checkpoint in "$out"/step_*; do
     step=$(basename "$checkpoint" | tr -dc '0-9')
     "${quasar[@]}" generate "$checkpoint" \
@@ -126,6 +128,13 @@ for checkpoint in "$out"/step_*; do
         --out "$out/benchmark-samples-$step.jsonl" \
         --tokens 460 --temperature 0.7 --top-k 20 \
         --repeats "$benchmark_repeats"
+    # Pre-register the first checkpoint for inference A/B.  The full baseline
+    # run measures it well below saturation; choosing it before looking at this
+    # run's samples avoids selecting a conveniently favourable checkpoint.
+    if [ -z "$inference_checkpoint" ]; then
+        inference_checkpoint=$checkpoint
+        inference_samples="$out/benchmark-samples-$step.jsonl"
+    fi
 done
 
 stage grade
@@ -136,6 +145,22 @@ benchmark_last=$(ls "$out"/benchmark-samples-*.jsonl | tail -1)
 "${harness[@]}" grade "$benchmark_last" \
     --sheet "$out/failures.png" --order worst >/dev/null
 "${harness[@]}" benchmark "$benchmark_last" --json "$out/benchmark.json"
+
+# One additional pass at the pre-registered, unsaturated first checkpoint
+# compares prevention with post-hoc rejection on the same fixed prompts.
+# Rejection uses its already generated unconstrained replicates, so its actual
+# compute budget is counted rather than hidden behind the first accepted answer.
+"${quasar[@]}" generate "$inference_checkpoint" \
+    --tokenizer "$corpus/tokenizer.json" \
+    --constraints "$corpus/constraints.json" \
+    --prompts "$corpus/benchmark.jsonl" \
+    --out "$out/constrained.jsonl" \
+    --tokens 460 --temperature 0.7 --top-k 20
+"${harness[@]}" select-rejections \
+    "$inference_samples" "$out/rejected.jsonl"
+"${harness[@]}" compare-inference \
+    "$out/constrained.jsonl" "$out/rejected.jsonl" \
+    --json "$out/inference.json"
 
 # The module sheet is now the whole fixed benchmark, not a five-item accidental
 # slice of the mixed prompts.  The mixed sheet above remains as a broad

@@ -94,6 +94,11 @@ impl Tokenizer {
         self.eos
     }
 
+    /// Resolve a grammar token without exposing the tokenizer implementation.
+    pub fn token_id(&self, token: &str) -> Option<u16> {
+        self.inner.token_to_id(token).and_then(|id| u16::try_from(id).ok())
+    }
+
     /// Encode one document, terminated by [`EOS`].
     pub fn encode(&self, text: &str) -> Result<Vec<u16>, Error> {
         let mut ids = self.encode_raw(text)?;

@@ -33,7 +33,21 @@ def test_the_layout_is_the_one_quasar_train_expects(corpus):
     assert (out / "train" / "meta.json").exists()
     assert (out / "valid" / "meta.json").exists()
     assert (out / "tokenizer.json").exists()
+    assert (out / "constraints.json").exists()
     assert sorted(path.name for path in (out / "train").glob("*.bin")) == ["shard_0000.bin"]
+
+
+def test_constrained_decoder_schema_carries_geometry_arity_and_legal_recipes(corpus):
+    out, _ = corpus
+    schema = json.loads((out / "constraints.json").read_text())
+    entities = schema["entities"]
+    assert schema["version"] == "factorio-v1"
+    assert entities["assembling-machine-1"]["width"] == 3
+    assert entities["assembling-machine-1"]["height"] == 3
+    assert "r:electronic-circuit" in entities["assembling-machine-1"]["recipes"]
+    assert entities["assembling-machine-1"]["flow"] is False
+    assert entities["underground-belt"]["recipes"] == []
+    assert entities["underground-belt"]["flow"] is True
 
 
 def test_every_document_survives_the_round_trip_through_the_shards(corpus):

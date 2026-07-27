@@ -15,6 +15,9 @@ use crate::data::Tokenizer;
 use crate::data::tokenizer;
 use crate::model::Quasar;
 
+mod factorio;
+pub use factorio::Grammar as FactorioGrammar;
+
 /// How to sample.
 #[derive(Debug, Clone, Copy)]
 pub struct Sampler {
@@ -64,6 +67,33 @@ pub fn generate(
     tokenizer.decode(&ids)
 }
 
+/// Continue a Factorio prompt while masking malformed and invalid placements.
+pub fn generate_constrained(
+    model: &Quasar,
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    seq_len: usize,
+    sampler: &Sampler,
+    grammar: &FactorioGrammar,
+    device: &Device,
+) -> Result<String, tokenizer::Error> {
+    let mut ids = tokenizer.encode_raw(prompt)?;
+    let mut rng = ChaCha8Rng::seed_from_u64(sampler.seed);
+    let mut decoder = grammar.decoder(prompt);
+
+    for _ in 0..sampler.max_tokens {
+        let context = &ids[ids.len().saturating_sub(seq_len)..];
+        let allowed = decoder.allowed();
+        let next = step_allowed(model, context, sampler, &mut rng, device, Some(&allowed));
+        if next == tokenizer.eos() {
+            break;
+        }
+        decoder.advance(next);
+        ids.push(next);
+    }
+    tokenizer.decode(&ids)
+}
+
 /// One token, sampled from the distribution at the last position.
 fn step(
     model: &Quasar,
@@ -72,24 +102,60 @@ fn step(
     rng: &mut ChaCha8Rng,
     device: &Device,
 ) -> u16 {
+    step_allowed(model, context, sampler, rng, device, None)
+}
+
+fn step_allowed(
+    model: &Quasar,
+    context: &[u16],
+    sampler: &Sampler,
+    rng: &mut ChaCha8Rng,
+    device: &Device,
+    allowed: Option<&[u16]>,
+) -> u16 {
     let ids: Vec<i32> = context.iter().map(|&id| id as i32).collect();
     let tokens = Tensor::<1, Int>::from_ints(&ids[..], device).reshape([1, ids.len()]);
     let logits = model.forward(tokens);
 
     let [_, seq, vocab] = logits.dims();
     let last = logits.slice([0..1, seq - 1..seq, 0..vocab]).reshape([vocab]);
-    let scaled = match sampler.temperature {
-        t if t <= 0.0 => return last.argmax(0).into_scalar::<i32>() as u16,
-        t => last.div_scalar(t),
+    let scaled = match (sampler.temperature, allowed) {
+        (t, None) if t <= 0.0 => return last.argmax(0).into_scalar::<i32>() as u16,
+        (t, Some(allowed)) if t <= 0.0 => {
+            let logits = last.into_data().to_vec::<f32>().expect("logits are f32");
+            return *allowed
+                .iter()
+                .max_by(|&&a, &&b| logits[a as usize].total_cmp(&logits[b as usize]))
+                .expect("the constraint always offers a token");
+        }
+        (t, _) => last.div_scalar(t),
     };
+    if let Some(allowed) = allowed {
+        // Normalise inside the allowed set. Softmaxing the whole vocabulary
+        // first is algebraically equivalent but can round every legal token to
+        // zero when the model strongly prefers an impossible one.
+        let logits = scaled.into_data().to_vec::<f32>().expect("logits are f32");
+        let peak = allowed
+            .iter()
+            .map(|&id| logits[id as usize])
+            .max_by(f32::total_cmp)
+            .expect("the constraint always offers a token");
+        let mut weights = vec![0.0; logits.len()];
+        for &id in allowed {
+            weights[id as usize] = (logits[id as usize] - peak).exp();
+        }
+        return pick_allowed(&weights, sampler.top_k, rng, Some(allowed));
+    }
     let probs = softmax(scaled, 0).into_data().to_vec::<f32>().expect("probabilities are f32");
-    pick(&probs, sampler.top_k, rng)
+    pick_allowed(&probs, sampler.top_k, rng, None)
 }
 
-/// Sample an index from `probs`, restricted to its `top_k` largest entries.
-fn pick(probs: &[f32], top_k: usize, rng: &mut ChaCha8Rng) -> u16 {
-    let mut order: Vec<usize> = (0..probs.len()).collect();
-    let keep = if top_k == 0 { probs.len() } else { top_k.min(probs.len()) };
+fn pick_allowed(probs: &[f32], top_k: usize, rng: &mut ChaCha8Rng, allowed: Option<&[u16]>) -> u16 {
+    let mut order: Vec<usize> = match allowed {
+        Some(ids) => ids.iter().map(|&id| id as usize).collect(),
+        None => (0..probs.len()).collect(),
+    };
+    let keep = if top_k == 0 { order.len() } else { top_k.min(order.len()) };
     order.sort_unstable_by(|&a, &b| probs[b].total_cmp(&probs[a]));
     order.truncate(keep);
 
@@ -139,7 +205,7 @@ mod tests {
         let probs = [0.1, 0.7, 0.05, 0.15];
         let mut rng = ChaCha8Rng::seed_from_u64(7);
 
-        let picks: Vec<u16> = (0..64).map(|_| pick(&probs, 2, &mut rng)).collect();
+        let picks: Vec<u16> = (0..64).map(|_| pick_allowed(&probs, 2, &mut rng, None)).collect();
 
         assert!(picks.iter().all(|&i| i == 1 || i == 3), "{picks:?}");
     }
@@ -148,8 +214,31 @@ mod tests {
     fn a_certain_distribution_always_picks_its_token() {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
 
-        let pick = pick(&[0.0, 0.0, 1.0], 0, &mut rng);
+        let pick = pick_allowed(&[0.0, 0.0, 1.0], 0, &mut rng, None);
 
         assert_eq!(pick, 2);
+    }
+
+    #[test]
+    fn a_masked_token_wins_even_when_an_impossible_token_has_more_probability() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+
+        let pick = pick_allowed(&[0.99, 0.01, 0.0], 1, &mut rng, Some(&[1, 2]));
+
+        assert_eq!(pick, 1);
+    }
+
+    #[test]
+    fn a_legal_token_cannot_underflow_when_an_impossible_one_dominates() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let logits = [1_000.0_f32, -1_000.0, -1_001.0];
+        let allowed = [1_u16, 2];
+        let peak = allowed.iter().map(|&id| logits[id as usize]).max_by(f32::total_cmp).unwrap();
+        let mut weights = vec![0.0; logits.len()];
+        for &id in &allowed {
+            weights[id as usize] = (logits[id as usize] - peak).exp();
+        }
+
+        assert_eq!(pick_allowed(&weights, 1, &mut rng, Some(&allowed)), 1);
     }
 }

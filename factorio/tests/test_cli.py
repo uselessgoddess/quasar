@@ -67,6 +67,7 @@ def test_a_document_that_is_not_one_is_an_error_message(capsys, tmp_path):
 
 def test_build_writes_everything_quasar_train_needs(corpus):
     assert (corpus / "tokenizer.json").is_file()
+    assert (corpus / "constraints.json").is_file()
     assert (corpus / "train" / "meta.json").is_file()
     assert (corpus / "valid" / "meta.json").is_file()
     assert list((corpus / "train").glob("*.bin"))

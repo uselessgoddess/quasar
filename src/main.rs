@@ -115,6 +115,11 @@ enum Command {
         /// checkpoint again for every replicate.
         #[arg(long, default_value_t = 1)]
         repeats: usize,
+        /// Incremental Factorio grammar/geometry schema emitted by the corpus
+        /// builder. Impossible syntax, overlaps, footprints, and recipes are
+        /// masked before top-k sampling.
+        #[arg(long)]
+        constraints: Option<PathBuf>,
     },
 }
 
@@ -236,13 +241,22 @@ fn main() -> Result<()> {
             top_k,
             seed,
             repeats,
+            constraints,
         } => {
             let sampler = generate::Sampler { temperature, top_k, max_tokens: tokens, seed };
             let asked = match prompts {
                 Some(path) => asks(&path)?,
                 None => vec![Ask { prompt, record: serde_json::Map::new() }],
             };
-            sample(&run, &tokenizer, &asked, out.as_deref(), &sampler, repeats)
+            sample(
+                &run,
+                &tokenizer,
+                &asked,
+                out.as_deref(),
+                &sampler,
+                repeats,
+                constraints.as_deref(),
+            )
         }
     }
 }
@@ -341,6 +355,7 @@ fn sample(
     out: Option<&Path>,
     sampler: &generate::Sampler,
     repeats: usize,
+    constraints: Option<&Path>,
 ) -> Result<()> {
     if repeats == 0 {
         anyhow::bail!("--repeats must be at least 1");
@@ -350,6 +365,8 @@ fn sample(
     let mut model = Quasar::new(&cfg, &device);
     checkpoint::weights(&dir, &mut model)?;
     let tokenizer = Tokenizer::load(tokenizer)?;
+    let constraints =
+        constraints.map(|path| generate::FactorioGrammar::load(path, &tokenizer)).transpose()?;
 
     let bar = ProgressBar::new((asked.len() * repeats) as u64).with_style(
         ProgressStyle::with_template("{bar:32} {pos}/{len} sampled in {elapsed}").unwrap(),
@@ -363,8 +380,25 @@ fn sample(
         for (index, ask) in asked.iter().enumerate() {
             let seed = replicated_seed(sampler.seed, asked.len(), replicate, index);
             let seeded = generate::Sampler { seed, ..*sampler };
-            let text =
-                generate::generate(&model, &tokenizer, &ask.prompt, cfg.seq_len, &seeded, &device)?;
+            let text = match constraints.as_ref() {
+                Some(grammar) => generate::generate_constrained(
+                    &model,
+                    &tokenizer,
+                    &ask.prompt,
+                    cfg.seq_len,
+                    &seeded,
+                    grammar,
+                    &device,
+                )?,
+                None => generate::generate(
+                    &model,
+                    &tokenizer,
+                    &ask.prompt,
+                    cfg.seq_len,
+                    &seeded,
+                    &device,
+                )?,
+            };
             match out {
                 // `text` already holds the prompt as well as the continuation,
                 // which is what a grader needs: half a blueprint parses as none.
@@ -374,6 +408,10 @@ fn sample(
                     record.insert("text".into(), text.into());
                     record.insert("replicate".into(), replicate.into());
                     record.insert("sampling_seed".into(), seed.into());
+                    record.insert(
+                        "decoding".into(),
+                        if constraints.is_some() { "constrained" } else { "unconstrained" }.into(),
+                    );
                     lines.push_str(&serde_json::to_string(&record)?);
                     lines.push('\n');
                 }

@@ -33,7 +33,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from itertools import zip_longest
 
-from . import augment, benchmark, grammar, shards, synth, tokenizer, validate
+from . import augment, benchmark, constraints, grammar, shards, synth, tokenizer, validate
 from .blueprint import Blueprint
 from .grammar import Spec
 from .prototypes import Data, load
@@ -120,7 +120,7 @@ def build(
     prompts: int = 256,
     weights: dict[str, float] | None = None,
 ) -> Stats:
-    """Write `out/train`, `out/valid`, `out/tokenizer.json` and `out/manifest.json`.
+    """Write shards, prompts, tokenizer, decoding constraints, and manifest.
 
     `extra` is where scraped human blueprints join the mixture; they arrive as
     `Design`s so they are deduplicated, graded and split by exactly the same
@@ -135,6 +135,7 @@ def build(
     out.mkdir(parents=True, exist_ok=True)
     encoder = tokenizer.Encoder(data)
     tokenizer.write(out / "tokenizer.json", data)
+    constraints.write(out / "constraints.json", data)
 
     train = shards.Writer(out / "train", len(encoder), encoder.eos)
     valid = shards.Writer(out / "valid", len(encoder), encoder.eos)
@@ -151,8 +152,8 @@ def build(
 
         A benchmark collision consumes a random draw, not one of the requested
         corpus slots.  Continuing at the next design index preserves the
-        prefix property while keeping a 20,000-design request at 20,000 draws
-        even when one exact reference geometry was reserved.
+        prefix property while keeping a 20,000-design request at 20,000 accepted
+        candidates even when an exact reference geometry was reserved.
         """
 
         accepted = 0

@@ -27,7 +27,7 @@ import random
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 
-from . import benchmark, dataset, grammar, plots, prototypes, render, synth, validate
+from . import benchmark, dataset, grammar, inference, plots, prototypes, render, synth, validate
 from . import blueprint as bp
 
 # Rule width for the printed tables. 72 so that two of them fit side by side in
@@ -124,6 +124,26 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--bootstrap", type=int, default=2_000, help="bootstrap resamples")
     bench.add_argument("--seed", type=int, default=0, help="deterministic bootstrap seed")
     bench.set_defaults(run=_benchmark)
+
+    select = sub.add_parser(
+        "select-rejections",
+        help="take the first valid/spec-honouring attempt per prompt",
+    )
+    select.add_argument("samples", type=pathlib.Path)
+    select.add_argument("out", type=pathlib.Path)
+    select.set_defaults(run=_select_rejections)
+
+    compare = sub.add_parser(
+        "compare-inference",
+        help="compare constrained decoding with selected reject/regenerate output",
+    )
+    compare.add_argument("constrained", type=pathlib.Path)
+    compare.add_argument("rejected", type=pathlib.Path)
+    compare.add_argument("--json", type=pathlib.Path)
+    compare.add_argument("--confidence", type=float, default=0.95)
+    compare.add_argument("--bootstrap", type=int, default=2_000)
+    compare.add_argument("--seed", type=int, default=0)
+    compare.set_defaults(run=_compare_inference)
 
     plot = sub.add_parser("plot", help="metric panels from a training log")
     plot.add_argument("log", type=pathlib.Path, help="quasar train stdout, or - for stdin")
@@ -365,6 +385,44 @@ def _benchmark(args) -> int:
                     f"replicate {row['replicate']}",
                     f"flow {summary['mean_flow']:.3f} valid {summary['valid_rate']:.3f}",
                 )
+            ]
+        )
+    if args.json:
+        _write(args.json, (json.dumps(result, indent=2) + "\n").encode())
+    return 0
+
+
+def _select_rejections(args) -> int:
+    chosen = inference.select(list(_samples(args.samples)), prototypes.load())
+    payload = "".join(json.dumps(record, sort_keys=True) + "\n" for record in chosen)
+    _write(args.out, payload.encode())
+    accepted = sum(record["accepted"] for record in chosen)
+    generated = sum(record["attempt_budget"] for record in chosen)
+    print(f"{accepted}/{len(chosen)} accepted from {generated} generated attempts -> {args.out}")
+    return 0
+
+
+def _compare_inference(args) -> int:
+    result = inference.compare(
+        list(_samples(args.constrained)),
+        list(_samples(args.rejected)),
+        prototypes.load(),
+        confidence=args.confidence,
+        iterations=args.bootstrap,
+        seed=args.seed,
+    )
+    _rule("INFERENCE A/B", f"{result['prompts']} fixed prompts")
+    for name, method in result["methods"].items():
+        summary = method["summary"]
+        _rows(
+            [
+                (name.replace("_", " "), ""),
+                ("generated attempts", method["generated_attempts"]),
+                ("mean attempts used", f"{method['mean_attempts_used']:.2f}"),
+                ("accepted", f"{method['accepted']}/{result['prompts']}"),
+                ("valid", f"{summary['valid_rate']:.3f}"),
+                ("spec honoured", f"{summary['spec_rate']:.3f}"),
+                ("flow", f"{summary['mean_flow']:.3f}"),
             ]
         )
     if args.json:

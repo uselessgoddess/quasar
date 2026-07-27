@@ -150,6 +150,19 @@ def test_green_science_factory_routes_the_diamond_and_three_item_stage():
         assert len([port for port in spec.inputs() if port.item == "iron-plate"]) >= 2
 
 
+def test_factory_target_has_many_geometrically_distinct_training_layouts():
+    """A DAG must be a family of routes, not two templates seen under rotations."""
+    target = FACTORIES[0]
+    layouts = set()
+    for seed, form in enumerate(synth.FACTORY_FORMS):
+        blueprint, spec = synth.module_for(random.Random(seed), DATA, target, factory_form=form)
+        report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+        assert (report.mixed, report.leaks) == (0, 0)
+        layouts.add(augment.canonical(blueprint, DATA))
+    assert len(layouts) == len(synth.FACTORY_FORMS) == 32
+
+
 def test_a_branching_module_is_two_columns_and_not_a_deeper_stack():
     """The geometry the flow report cannot tell apart from a lucky stack.
 

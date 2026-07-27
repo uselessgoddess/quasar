@@ -245,7 +245,7 @@ pathlib.Path(sys.argv[4]).write_text(ranked[0]["text"] if ranked else "")
 modules = sorted(benchmark, key=rank, reverse=True)
 pathlib.Path(sys.argv[5]).write_text(modules[0]["text"] if modules else "")
 
-# And over the held-out forms of both explicit recipe DAGs.
+# And over the held-out forms of all three explicit recipe DAGs.
 dags = sorted(dag, key=rank, reverse=True)
 pathlib.Path(sys.argv[6]).write_text(dags[0]["text"] if dags else "")
 PY

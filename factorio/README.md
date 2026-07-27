@@ -144,8 +144,8 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --prompts corpus/benchmark.jsonl --out runs/nano/benchmark-samples-000400.jsonl \
     --tokens 460 --repeats 2
 
-# the companion DAG benchmark: 8 held-out route combinations, four independent
-# port/orientation prompts each
+# the companion DAG benchmark: three targets over the same 8 held-out route
+# combinations, one deterministic port/orientation prompt per target/layout
 cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --tokenizer corpus/tokenizer.json \
     --prompts corpus/dag-benchmark.jsonl --out runs/nano/dag-samples-000400.jsonl \

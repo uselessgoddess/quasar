@@ -33,7 +33,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from itertools import zip_longest
 
-from . import augment, grammar, shards, synth, tokenizer, validate
+from . import augment, benchmark, grammar, shards, synth, tokenizer, validate
 from .blueprint import Blueprint
 from .grammar import Spec
 from .prototypes import Data, load
@@ -65,6 +65,10 @@ class Stats:
     #: Documents discarded as byte-identical to one already written.
     duplicates: int = 0
     rejected: int = 0
+    #: Draws withheld because their canonical layout belongs to the fixed
+    #: module benchmark. They are neither train nor validation documents.
+    benchmark_excluded: int = 0
+    benchmark_prompts: int = 0
     train_docs: int = 0
     valid_docs: int = 0
     train_tokens: int = 0
@@ -81,6 +85,7 @@ def designs(
     count: int,
     *,
     seed: int = 0,
+    start: int = 0,
     data: Data | None = None,
     variants: int = 4,
     weights: dict[str, float] | None = None,
@@ -94,7 +99,7 @@ def designs(
     `weights` overrides `synth.WEIGHTS`; see `synth.mixture`.
     """
     data = data or load()
-    for index in range(count):
+    for index in range(start, start + count):
         rng = random.Random(seed * 1_000_003 + index)
         blueprint, spec = synth.sample(rng, data, weights)
         design = Design(kind=spec.kind, blueprint=blueprint, spec=spec)
@@ -134,16 +139,51 @@ def build(
     train = shards.Writer(out / "train", len(encoder), encoder.eos)
     valid = shards.Writer(out / "valid", len(encoder), encoder.eos)
     stats = Stats(vocab_size=len(encoder))
+    fixed = benchmark.cases(data)
+    reserved = benchmark.reserved(fixed, data)
+    stats.benchmark_prompts = len(fixed)
     sides: dict[str, bool] = {}
     seen: set[bytes] = set()
     held: list[Design] = []
 
-    stream = designs(count, seed=seed, data=data, variants=variants, weights=weights)
+    def unreserved_designs() -> Iterator[Design]:
+        """Draw ``count`` synthetic candidates that are safe to train on.
+
+        A benchmark collision consumes a random draw, not one of the requested
+        corpus slots.  Continuing at the next design index preserves the
+        prefix property while keeping a 20,000-design request at 20,000 draws
+        even when one exact reference geometry was reserved.
+        """
+
+        accepted = 0
+        index = 0
+        while accepted < count:
+            design = next(
+                designs(
+                    1,
+                    seed=seed,
+                    start=index,
+                    data=data,
+                    variants=variants,
+                    weights=weights,
+                )
+            )
+            index += 1
+            if augment.canonical(design.blueprint, data) in reserved:
+                stats.benchmark_excluded += 1
+                continue
+            accepted += 1
+            yield design
+
+    stream = unreserved_designs()
     for design in _chain(stream, extra):
         # Two draws that differ only by a turn, a flip or a belt tier are one
         # design; splitting them apart would put one in each split. See
         # `augment.canonical`.
         key = augment.canonical(design.blueprint, data)
+        if key in reserved:
+            stats.benchmark_excluded += 1
+            continue
         if key in sides:
             # Merged, not dropped. A smelter column for copper has the same
             # layout as one for iron and so the same key, but a different
@@ -183,6 +223,7 @@ def build(
     stats.train_tokens = train.finish().tokens
     stats.valid_tokens = valid.finish().tokens
     _write_prompts(out / "prompts.jsonl", held, data, prompts)
+    benchmark.write(out / "benchmark.jsonl", fixed)
     (out / "manifest.json").write_text(json.dumps(stats.to_dict(), indent=2) + "\n")
     return stats
 

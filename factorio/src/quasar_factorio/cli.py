@@ -27,8 +27,8 @@ import random
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 
+from . import benchmark, dataset, grammar, plots, prototypes, render, synth, validate
 from . import blueprint as bp
-from . import dataset, grammar, plots, prototypes, render, synth, validate
 
 # Rule width for the printed tables. 72 so that two of them fit side by side in
 # a 150-column terminal and neither wraps in an 80-column one.
@@ -115,6 +115,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     grade.set_defaults(run=_grade)
 
+    bench = sub.add_parser(
+        "benchmark", help="grade the fixed repeated module benchmark with confidence intervals"
+    )
+    bench.add_argument("samples", type=pathlib.Path)
+    bench.add_argument("--json", type=pathlib.Path, help="write the full stratified report")
+    bench.add_argument("--confidence", type=float, default=0.95)
+    bench.add_argument("--bootstrap", type=int, default=2_000, help="bootstrap resamples")
+    bench.add_argument("--seed", type=int, default=0, help="deterministic bootstrap seed")
+    bench.set_defaults(run=_benchmark)
+
     plot = sub.add_parser("plot", help="metric panels from a training log")
     plot.add_argument("log", type=pathlib.Path, help="quasar train stdout, or - for stdin")
     plot.add_argument("out", type=pathlib.Path)
@@ -194,6 +204,8 @@ def _build(args) -> int:
             ("layouts redrawn", stats.repeats),
             ("duplicates dropped", stats.duplicates),
             ("rejected", stats.rejected),
+            ("benchmark excluded", stats.benchmark_excluded),
+            ("benchmark prompts", stats.benchmark_prompts),
             ("train tokens", stats.train_tokens),
             ("valid tokens", stats.valid_tokens),
             ("vocab", stats.vocab_size),
@@ -316,6 +328,47 @@ def _grade(args) -> int:
     if args.sheet:
         _sheet(args.sheet, reports, data, columns=args.columns, order=args.order)
         print(f"\n{args.sheet}")
+    return 0
+
+
+def _benchmark(args) -> int:
+    """The primary module verdict, with repeated sampling and uncertainty."""
+    data = prototypes.load()
+    result = benchmark.evaluate(
+        list(_samples(args.samples)),
+        data,
+        confidence=args.confidence,
+        iterations=args.bootstrap,
+        seed=args.seed,
+    )
+    _rule("MODULE BENCHMARK", str(args.samples))
+    _rows(
+        [
+            ("version", result["benchmark"]),
+            ("samples", result["samples"]),
+            ("fixed prompts", result["prompts"]),
+            ("target strata", result["targets"]),
+            ("fork prompts", result["fork_prompts"]),
+            ("sampling replicates", result["replicates"]),
+        ]
+    )
+    _rule(f"{args.confidence:.0%} CONFIDENCE", result["confidence"]["method"])
+    for name, interval in result["confidence"]["metrics"].items():
+        note = f"{interval['mean']:.3f} [{interval['low']:.3f}, {interval['high']:.3f}]"
+        _bar(name, interval["mean"], note)
+    _rule("BY REPLICATE")
+    for row in result["by_replicate"]:
+        summary = row["summary"]
+        _rows(
+            [
+                (
+                    f"replicate {row['replicate']}",
+                    f"flow {summary['mean_flow']:.3f} valid {summary['valid_rate']:.3f}",
+                )
+            ]
+        )
+    if args.json:
+        _write(args.json, (json.dumps(result, indent=2) + "\n").encode())
     return 0
 
 

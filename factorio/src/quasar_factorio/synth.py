@@ -774,6 +774,21 @@ def module(rng: random.Random, data: Data) -> tuple[Blueprint, Spec]:
     the relation that holds at inference time.
     """
     target = rng.choice(_module_targets(data))
+    return module_for(rng, data, target)
+
+
+def module_for(rng: random.Random, data: Data, target: planner.Module) -> tuple[Blueprint, Spec]:
+    """Draw one module for an explicit catalogue target.
+
+    ``module`` is the training-mixture entry point and chooses its target at
+    random.  Evaluation needs the opposite: a fixed, stratified set in which
+    every target is represented regardless of how the catalogue happens to be
+    ordered or weighted.  Keeping the rest of the draw in this shared function
+    guarantees that benchmark prompts exercise exactly the geometry the model
+    trained on rather than a second, easier template.
+    """
+    if target not in _module_targets(data):
+        raise ValueError(f"module target is not in the catalogue: {target}")
     layout = Layout.draw(rng)
     build = _forked if target.shape == "fork" else _stacked
     blueprint, ports, steps = build(rng, data, target, layout)

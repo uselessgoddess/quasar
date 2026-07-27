@@ -6,7 +6,18 @@ from dataclasses import replace
 
 import pytest
 
-from quasar_factorio import augment, dataset, grammar, prototypes, shards, synth, tokenizer
+from quasar_factorio import (
+    augment,
+    benchmark,
+    dataset,
+    grammar,
+    plan,
+    prototypes,
+    shards,
+    synth,
+    tokenizer,
+    validate,
+)
 
 DATA = prototypes.load()
 
@@ -109,6 +120,54 @@ def test_prompts_are_held_out_and_replayable(corpus):
         assert entry["reference"].startswith(entry["prompt"])
 
 
+def test_the_fixed_module_benchmark_is_stratified_and_working(corpus):
+    """The primary metric has 64 real denominators, not five lucky modules."""
+    out, stats = corpus
+    records = dataset.read_prompts(out / "benchmark.jsonl")
+    targets = plan.modules(DATA)
+    counts = {}
+    shapes = {}
+    for record in records:
+        counts[record["benchmark_target"]] = counts.get(record["benchmark_target"], 0) + 1
+        shapes[record["benchmark_target"]] = record["shape"]
+        assert record["benchmark"] == benchmark.VERSION
+        assert record["kind"] == "module"
+        assert record["reference"].startswith(record["prompt"])
+        report = validate.grade(record["reference"], DATA)
+        assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
+
+    assert len(records) == stats.benchmark_prompts == 64
+    assert len(counts) == len(targets) == 29
+    assert min(counts.values()) >= 2
+    assert all(counts[name] >= 3 for name, shape in shapes.items() if shape == "fork")
+
+
+def test_the_fixed_benchmark_does_not_depend_on_the_corpus_seed(tmp_path):
+    """Changing training data must not move the evaluation goalposts."""
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    dataset.build(first, 12, seed=1, variants=1, data=DATA)
+    dataset.build(second, 12, seed=999, variants=1, data=DATA)
+    assert (first / "benchmark.jsonl").read_bytes() == (second / "benchmark.jsonl").read_bytes()
+
+
+def test_no_fixed_benchmark_layout_is_written_to_either_shard(corpus):
+    """Exact reference geometry is reserved before the split is assigned."""
+    out, _ = corpus
+    reserved = {
+        augment.canonical(grammar.parse(record["reference"], DATA)[0], DATA)
+        for record in dataset.read_prompts(out / "benchmark.jsonl")
+    }
+    encoder = tokenizer.Encoder(DATA)
+    written = set()
+    for split in ("train", "valid"):
+        tokens, meta = shards.read(out / split)
+        for ids in shards.documents(tokens, meta.eos):
+            blueprint, _ = grammar.parse(encoder.decode(ids), DATA)
+            written.add(augment.canonical(blueprint, DATA))
+    assert not reserved & written
+
+
 def test_the_first_prompts_are_one_of_each_kind_rather_than_a_slice_of_the_mixture(tmp_path):
     """What a caller taking a prefix gets, which is every caller there is.
 
@@ -136,7 +195,7 @@ def test_extra_designs_join_the_mixture(tmp_path):
     """Where scraped human blueprints will arrive, held to the same rules."""
     extra = list(dataset.designs(6, seed=99, data=DATA))
     stats = dataset.build(tmp_path, 4, seed=0, variants=1, extra=iter(extra), data=DATA)
-    assert stats.designs + stats.repeats == 10
+    assert stats.designs + stats.repeats + stats.benchmark_excluded == 10
     assert stats.designs > 4  # the extras are not silently dropped
 
 

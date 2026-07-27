@@ -65,6 +65,14 @@ def test_generators_are_deterministic_given_a_seed(kind):
     assert spec == spec2
 
 
+def test_an_explicit_module_target_uses_the_same_deterministic_draw_path():
+    target = plan.modules(DATA)[7]
+    first = synth.module_for(random.Random(23), DATA, target)
+    second = synth.module_for(random.Random(23), DATA, target)
+    assert first == second
+    assert first[1].product == target.product
+
+
 @pytest.mark.parametrize("kind", sorted(synth.GENERATORS))
 def test_generators_actually_vary(kind):
     shapes = {blueprint.extent(DATA) for blueprint, _ in draw(synth.GENERATORS[kind], 40)}

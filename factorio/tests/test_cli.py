@@ -70,6 +70,7 @@ def test_build_writes_everything_quasar_train_needs(corpus):
     assert (corpus / "train" / "meta.json").is_file()
     assert (corpus / "valid" / "meta.json").is_file()
     assert list((corpus / "train").glob("*.bin"))
+    assert (corpus / "benchmark.jsonl").is_file()
 
 
 def test_the_manifest_agrees_with_what_was_asked_for(corpus):
@@ -79,6 +80,7 @@ def test_the_manifest_agrees_with_what_was_asked_for(corpus):
     # rejection here is a bug rather than an acceptable loss.
     assert manifest["rejected"] == 0
     assert manifest["vocab_size"] == 739
+    assert manifest["benchmark_prompts"] == 64
 
 
 def test_the_held_out_prompts_carry_what_a_grader_needs(corpus):

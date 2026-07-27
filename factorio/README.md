@@ -137,15 +137,23 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --tokenizer corpus/tokenizer.json \
     --prompts corpus/prompts.jsonl --out runs/nano/samples-000400.jsonl --tokens 460
 
+# the primary module benchmark: 64 fixed prompts, all 29 targets, five fork
+# strata, and independent recorded seeds without reloading the checkpoint
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json \
+    --prompts corpus/benchmark.jsonl --out runs/nano/benchmark-samples-000400.jsonl \
+    --tokens 460 --repeats 2
+
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
     --sheet runs/nano/sheet.png --json runs/nano/grade.json
 
-# the same, over one generator's generations only -- `== GRADE MODULES ==`
-python -m quasar_factorio.cli grade runs/nano/samples.jsonl --kind module
+# a stratified report with a 95% prompt-and-sampling bootstrap interval
+python -m quasar_factorio.cli benchmark \
+    runs/nano/benchmark-samples-000400.jsonl --json runs/nano/benchmark.json
 
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
-    --grade runs/nano/samples-*.jsonl
+    --grade runs/nano/benchmark-samples-*.jsonl
 
 # and the end of the whole thing: something to paste into the game
 python -m quasar_factorio.cli export design.txt | xclip -selection clipboard
@@ -159,6 +167,17 @@ Every command reads something off disk, writes something to disk and prints what
 it did. That is what makes the loop debuggable: every intermediate is sitting
 there to be looked at, and any step can be re-run on its own without rebuilding
 the ones before it.
+
+`module-v1` is deliberately pinned rather than rebuilt from the live catalogue:
+each of the 29 targets appears at least twice, every branching target a third
+time, and the electronic-circuit flagship fills the 64th slot. Its reference
+layouts are reserved before either training shard is written. Changing the
+corpus seed therefore cannot move the evaluation goalposts or leak an exact
+benchmark layout into training. `generate --repeats` copies the benchmark
+metadata and adds `replicate` and `sampling_seed` to every row; `benchmark`
+refuses incomplete replicates and bootstraps within target and prompt strata
+instead of treating repeated generations of one specification as unrelated
+examples.
 
 ## What the corpus is
 

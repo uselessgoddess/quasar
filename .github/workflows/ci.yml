@@ -151,6 +151,8 @@ jobs:
           2>&1 | tee ../../benchmark-logs/profile.log
       - name: P1 — dense GEMM roofline
         run: examples/roofline.sh
+      - name: P3 — chunked cross-entropy paired A/B
+        run: examples/cross_entropy_ab.sh
       - name: Preserve performance diagnostics
         if: always()
         uses: actions/upload-artifact@v4

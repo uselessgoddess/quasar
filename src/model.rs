@@ -2,6 +2,7 @@
 
 mod attention;
 mod block;
+mod chunked_loss;
 mod ffn;
 mod init;
 mod lm;

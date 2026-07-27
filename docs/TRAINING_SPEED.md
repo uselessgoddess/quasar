@@ -87,12 +87,91 @@ launch/orchestration overhead. Изолированный roofline и precision 
 6×8 без checkpointing не завершился OOM, но упал до 2 715 tok/s из-за memory
 pressure. Пик VRAM и steady throughput нужно проверять вместе.
 
+### P2: bf16 только для tied head — отклонён
+
+[Run 30312309297](https://github.com/uselessgoddess/quasar/actions/runs/30312309297)
+проверил минимальный precision seam на commit
+`49185deb6657c4bb23b08bb6aad6ddbd3ea54179`: параметры, optimizer state,
+hidden states, logits, softmax и loss оставались fp32; в bf16 переводились
+только вход и связанный embedding weight на время `hidden × weightᵀ`. Обе
+стороны получили одинаковые seed, синтетические токены, 131 072 токена/step,
+один warm-up и девять measured steps. Первый measured step снова содержал
+autotune, поэтому в таблице медиана всех девяти и полный min/max:
+
+| вариант | median | min/max | tok/s | effective | peak VRAM | решение |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| fp32 control | 12.470 s | 12.448–14.488 s | 10 511 | 5.08 TFLOP/s | 14.117 GiB | reference |
+| bf16 tied head | 10.852 s | 10.837–12.846 s | **12 078** | **5.84 TFLOP/s** | **13.359 GiB** | **revert** |
+
+Скорость выросла на 14.9%, FLOPs/token не менялись, а память уменьшилась на
+0.758 GiB. Начальная диагностика тоже выглядела приемлемо: activation
+`[-4.8125, 5.0]`, mean `3.240e-3`, grad norm `1.216` против `1.228`, loss
+scale 1 и ноль NaN/Inf. Но trailing-3 smoothed loss вышел за обязательные
+±0.5% уже на пятой точке (`+0.5573%`), затем монотонно разошёлся до
+`+7.3727%` на десятой. Поэтому быстрый результат не является победой и
+[commit `4e61d99`](https://github.com/konard/uselessgoddess-quasar/commit/4e61d99b68a45db7dbdcb316359fc887444ded46)
+откатил seam.
+
+2K-step probe не продолжался после раннего нарушения gate: при измеренных
+10.852–12.470 s/step полный paired run занял бы около 13 часов и не мог
+изменить уже полученный отрицательный результат. Production остаётся fp32.
+
+### Итог P0–P2 и ETA
+
+Полный default `tiny-turbo` содержит 1.6384B токенов. Строка P1 — отдельный
+GEMM roofline, поэтому она не подменяет full-step throughput:
+
+| стадия | tok/s | effective | peak VRAM | ETA default | статус |
+| --- | ---: | ---: | ---: | ---: | --- |
+| P0 frozen fp32 | 10 558 | 5.11 TFLOP/s | 14.516 GiB | 43.1 ч | production |
+| P1 bf16 8192³ GEMM | — | 43.75 TFLOP/s roofline | — | — | stable diagnostic |
+| P2 bf16 tied head | 12 078 | 5.84 TFLOP/s | 13.359 GiB | 37.7 ч | quality fail |
+| production после P2 | **10 558** | **5.11 TFLOP/s** | **14.516 GiB** | **43.1 ч** | fp32 |
+
+`examples/performance_baseline.sh` теперь не только сохраняет sampler log, но
+и валит CI, если production peak превышает 15 GiB.
+
+### Stop/pivot analysis
+
+Цель 40 TFLOP/s требует почти 7.8× к P0. Текущий stack не показывает такого
+запаса:
+
+- full step использует 5.11 TFLOP/s, тогда как изолированный fp32 GEMM даёт
+  14.05 TFLOP/s: orchestration и не-GEMM части оставляют ещё примерно 2.7×
+  между моделью и уже достигнутым fp32 roofline;
+- matmul занимает 67.4% GPU timestamps, но recorded kernels покрывают только
+  392 ms из 1.040 s wall time профилированного steady micro-batch. Около 62%
+  wall time остаётся в launch/queue/orchestration;
+- Vulkan bf16 GEMM достигает 43–44 TFLOP/s, лишь 44–45% номинального matrix
+  peak. Даже идеальное превращение всей модели в этот roofline почти не
+  оставляет бюджета на softmax, norms, SSD и optimizer;
+- локальный head probe доказал, что WMMA ускоряет реальную forward/backward
+  нагрузку, но обычный autodiff через bf16 cast не сохраняет требуемую
+  optimization trajectory. Расширять тот же seam на FFN/QKV/Mamba projections
+  после такого сигнала небезопасно.
+
+Поэтому следующий крупный рычаг — не ещё один high-level cast. Go/no-go spike
+должен сначала дать для одного `640×32768` Linear точный bf16 forward/backward
+с fp32 gradient accumulation и fp32 master weight, стабильность без
+non-finite и не менее 60% matrix peak. Приоритетный путь:
+
+1. custom CubeCL mixed-precision Linear/VJP с fp32 accumulation;
+2. chunked fused cross-entropy с fp32 softmax и recompute head, чтобы не
+   удерживать полный logits tensor;
+3. paired full-step gate; продолжать fusion только если он превысит
+   20 effective TFLOP/s;
+4. если Vulkan не проходит Linear go/no-go, timeboxed HIP/hipBLASLt или Burn
+   ROCm backend spike. Не продолжать мелкие elementwise fusion до этого
+   решения.
+
 ## Precision и profiler
 
 На Vulkan bf16 отвергнут backend'ом, а f16 попал в panic Burn fusion и получил
 non-finite loss. На ROCm оба reduced dtype ранее падали при выборе RDNA4 WMMA.
-Поэтому production остаётся fp32. Это согласуется с отсутствием AMP в Burn, но
-решение основано именно на конечном full-step probe, а не на предположении.
+Эти старые global-dtype пробы не противоречат новому roofline: точечный cast
+вокруг GEMM теперь работает. Production всё равно остаётся fp32, потому что
+первый такой full-step seam не прошёл loss gate. Решение основано на paired
+измерении, а не на предположении об AMP.
 
 CubeCL profiler насчитал 9 948 kernel launches даже для одного micro-batch.
 Matmul занимает около 79% записанного GPU time, а elementwise/reduce/slice/copy

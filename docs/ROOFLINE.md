@@ -58,3 +58,11 @@ bf16 выбран первым кандидатом: на большой фор�
 динамический диапазон fp32, поэтому не требует loss scaling. Следующий тест —
 не глобальный dtype, а explicit casts только вокруг tied output-head GEMM с
 fp32 master weight, logits/loss и optimizer state.
+
+Этот downstream gate выполнен в
+[run 30312309297](https://github.com/uselessgoddess/quasar/actions/runs/30312309297).
+Head действительно ускорил полный step на 14.9% и снизил peak VRAM, но
+trailing-3 loss разошёлся на 7.37% при лимите 0.5%. Seam откатан: работающий
+bf16 roofline доказывает доступность matrix path, но не доказывает безопасный
+обычный autodiff через reduced-precision casts. Следующий go/no-go требует
+custom backward с fp32 gradient accumulation.

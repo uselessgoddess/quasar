@@ -30,6 +30,25 @@ set -e
 if [[ -n $sampler_pid ]]; then
     kill "$sampler_pid" 2>/dev/null || true
     wait "$sampler_pid" 2>/dev/null || true
+
+    peak_bytes=$(
+        awk '
+            /GPU\[0\].*VRAM Total Used Memory/ && $NF + 0 > peak {
+                peak = $NF + 0
+            }
+            END { printf "%.0f", peak }
+        ' "$log_dir/vram-baseline.log"
+    )
+    peak_gib=$(awk -v peak="$peak_bytes" 'BEGIN { printf "%.3f", peak / 1073741824 }')
+    printf 'vram peak_bytes=%s peak_gib=%s limit_gib=15.000\n' "$peak_bytes" "$peak_gib" \
+        | tee "$log_dir/vram-baseline.result"
+    if ((peak_bytes <= 0)); then
+        echo "VRAM sampler did not report GPU[0] usage" >&2
+        benchmark_status=1
+    elif ((peak_bytes > 15 * 1024 * 1024 * 1024)); then
+        echo "peak VRAM exceeds the 15 GiB production gate" >&2
+        benchmark_status=1
+    fi
 fi
 
 exit "$benchmark_status"

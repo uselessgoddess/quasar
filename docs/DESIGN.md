@@ -254,6 +254,24 @@ backend не выполняет. `base` тем более будет недоо�
 Подробный разбор наблюдения 40/60000 и ограничений burn-mamba находится в
 [`TRAINING_SPEED.md`](TRAINING_SPEED.md).
 
+### 4.1 Итоговая performance-стратегия для RDNA4
+
+P0/P1 issue #21 измерили production на 5.11 effective TFLOP/s и bf16 GEMM
+roofline на 43–44 TFLOP/s. Точечный bf16 tied head дал 5.84 TFLOP/s и
+13.359 GiB, но нарушил loss gate (7.37% против допустимых 0.5%), поэтому
+production precision path остаётся **fp32**.
+
+Это не запрет bf16 как hardware dtype: isolated Vulkan matrix path работает.
+Запрещён именно следующий необоснованный high-level cast. Выбранный backend
+path — custom mixed-precision Linear backward с fp32 accumulation и затем
+fused cross-entropy; go/no-go сначала проверяется на `640×32768` head.
+Если Vulkan не достигает 60% matrix peak или остаётся нестабилен, следующий
+шаг — ограниченный spike HIP/hipBLASLt или Burn ROCm. До full-step результата
+выше 20 TFLOP/s мелкие fusion не приоритетны: профиль показывает одновременно
+matmul bottleneck и большой launch/orchestration gap. Числа, A/B и причины
+отката находятся в [`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix —
+в [`ROOFLINE.md`](ROOFLINE.md).
+
 ## 5. Данные
 
 Основной корпус — **FineWeb-Edu, `sample/10BT`** (parquet, ~28 GB). Причины:

@@ -140,6 +140,7 @@ def test_every_module_draw_makes_the_item_it_advertises():
 
 def test_factories_route_shared_intermediates_and_three_item_stages():
     assert {target.product for target in FACTORIES} == {
+        "fast-splitter",
         "logistic-science-pack",
         "power-switch",
     }
@@ -159,9 +160,16 @@ def test_factory_targets_have_many_geometrically_distinct_training_layouts():
         layouts = set()
         for seed, form in enumerate(synth.FACTORY_FORMS):
             blueprint, spec = synth.module_for(random.Random(seed), DATA, target, factory_form=form)
-            report = validate.grade(grammar.serialise(blueprint, DATA, spec), DATA)
+            document = grammar.serialise(blueprint, DATA, spec)
+            report = validate.grade(document, DATA)
+            assert (
+                report.powered,
+                report.connected_inserters,
+                report.belts_lead_somewhere,
+            ) == (1.0, 1.0, 1.0)
             assert (report.delivers, report.fed, report.working) == (1.0, 1.0, 1.0)
             assert (report.mixed, report.leaks) == (0, 0)
+            assert len(document.split()) + 1 <= 512
             layouts.add(augment.canonical(blueprint, DATA))
         assert len(layouts) == len(synth.FACTORY_FORMS) == 32
 

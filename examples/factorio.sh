@@ -31,9 +31,9 @@ prompts=${PROMPTS:-24}
 # estimate of sampling variance.  They share one checkpoint load, so repeats
 # are much cheaper than separate generate invocations.
 benchmark_repeats=${BENCHMARK_REPEATS:-2}
-# The DAG curve needs coverage of all 32 fixed prompts (two targets × eight
-# held-out routes × two prompt variants) more than duplicate sampling. One draw
-# per prompt keeps the extra pass inside the CI GPU budget.
+# The DAG curve needs coverage of all 24 fixed prompts (three targets × eight
+# held-out routes) more than duplicate sampling. One draw per prompt keeps the
+# extra pass inside the CI GPU budget.
 dag_benchmark_repeats=${DAG_BENCHMARK_REPEATS:-1}
 backend=${BACKEND:-}
 # Human blueprints, if a cache has been fetched — 20,000 weighted draws are
@@ -132,10 +132,10 @@ for checkpoint in "$out"/step_*; do
         --out "$out/benchmark-samples-$step.jsonl" \
         --tokens 460 --temperature 0.7 --top-k 20 \
         --repeats "$benchmark_repeats"
-    # A separate held-out curve for two semantic DAGs: two prompts over each of
-    # eight unseen route combinations per target. Keeping it out of module-v1
-    # preserves that benchmark's baseline without increasing the old 32-prompt
-    # generation budget.
+    # A separate held-out curve for three semantic DAGs: one prompt over each
+    # of eight unseen route combinations per target. Keeping it out of
+    # module-v1 preserves that benchmark's baseline; 24 balanced conditions
+    # also fit below the previous 32-prompt generation budget.
     "${quasar[@]}" generate "$checkpoint" \
         --tokenizer "$corpus/tokenizer.json" \
         --prompts "$corpus/dag-benchmark.jsonl" \

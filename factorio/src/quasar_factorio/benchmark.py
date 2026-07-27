@@ -15,10 +15,10 @@ The reference blueprints are not training examples.  :mod:`dataset` reserves
 their canonical layouts before writing either shard, which gives the benchmark
 the same design-level holdout guarantee as the ordinary validation split.
 
-``dag-v2`` is the companion measurement for two multi-belt recipe graphs:
-32 prompts over the same eight held-out route combinations for green science
-and power switch.  It stays separate so the pinned module baseline does not
-move when DAG data changes.
+``dag-v3`` is the companion measurement for three multi-belt recipe graphs:
+24 prompts over the same eight held-out route combinations for green science,
+power switch, and fast splitter.  It stays separate so the pinned module
+baseline does not move when DAG data changes.
 """
 
 from __future__ import annotations
@@ -37,14 +37,15 @@ from .grammar import Spec
 from .prototypes import Data, load
 
 VERSION = "module-v1"
-DAG_VERSION = "dag-v2"
+DAG_VERSION = "dag-v3"
 DEFAULT_SIZE = 64
-DAG_SIZE = 32
-DAG_VARIANTS = 2
+DAG_SIZE = 24
+DAG_VARIANTS = 1
 DEFAULT_SEED = 19
 DAG_TARGETS = (
     "logistic-science-pack|iron-plate,copper-plate|d4|factory",
     "power-switch|iron-plate,copper-plate|d3|factory",
+    "fast-splitter|iron-plate,copper-plate|d4|factory",
 )
 
 # The benchmark is a versioned measurement, not a view of whatever happens to
@@ -217,13 +218,14 @@ def dag_cases(
     *,
     seed: int = DEFAULT_SEED,
 ) -> tuple[Case, ...]:
-    """Build fixed prompts over held-out route combinations for two DAGs.
+    """Build fixed prompts over held-out route combinations for three DAGs.
 
     ``module-v1`` remains pinned to its original 29 pre-DAG targets.  This
-    companion benchmark asks whether the model connects two different recipe
+    companion benchmark asks whether the model connects three different recipe
     graphs in eight held-out combinations of route order, spacing, and edge
-    margin. Two port/orientation prompts per target/layout preserve the existing
-    32-condition generation budget.
+    margin. One port/orientation prompt per target/layout keeps all targets
+    balanced while reducing the generation budget from 32 to 24 conditions;
+    the previous GPU job was already close to its 75-minute limit.
     """
     data = data or load()
     available = {target_id(target): target for target in plan.modules(data)}

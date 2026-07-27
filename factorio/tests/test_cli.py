@@ -83,7 +83,7 @@ def test_the_manifest_agrees_with_what_was_asked_for(corpus):
     assert manifest["rejected"] == 0
     assert manifest["vocab_size"] == 739
     assert manifest["benchmark_prompts"] == 64
-    assert manifest["dag_benchmark_prompts"] == 32
+    assert manifest["dag_benchmark_prompts"] == 24
 
 
 def test_the_held_out_prompts_carry_what_a_grader_needs(corpus):

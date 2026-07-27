@@ -7,7 +7,7 @@ whether each admitted factory target is a real family of canonical geometries.
 Run:
 
     PYTHONPATH=src python3 experiments/dag_catalogue.py [draws] [candidates]
-    PYTHONPATH=src python3 experiments/dag_catalogue.py --sheet ../docs/screenshots/dag-v2-forms.png
+    PYTHONPATH=src python3 experiments/dag_catalogue.py --sheet ../docs/screenshots/dag-v3-forms.png
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import pathlib
 import random
 from collections import Counter
 
-from quasar_factorio import augment, benchmark, plan, prototypes, render, synth
+from quasar_factorio import augment, benchmark, grammar, plan, prototypes, render, synth
 
 
 def _features(unit: plan.Plan) -> tuple[int, int, int]:
@@ -58,13 +58,16 @@ def main() -> int:
     for target in admitted.values():
         if target.shape != "factory":
             continue
-        layouts = {
-            augment.canonical(synth.module_for(random.Random(seed), data, target)[0], data)
-            for seed in range(draws)
-        }
+        samples = [synth.module_for(random.Random(seed), data, target) for seed in range(draws)]
+        layouts = {augment.canonical(blueprint, data) for blueprint, _ in samples}
+        entities = [len(blueprint.entities) for blueprint, _ in samples]
+        tokens = [
+            len(grammar.serialise(blueprint, data, spec).split()) + 1 for blueprint, spec in samples
+        ]
         print(
             f"{target.product:<30} {len(layouts):>3}/{draws:<3} canonical layouts "
-            f"({len(layouts) / draws:.0%} yield)"
+            f"({len(layouts) / draws:.0%} yield); "
+            f"entities {min(entities)}-{max(entities)}, tokens {min(tokens)}-{max(tokens)}"
         )
 
     print("\nUNPLACED DAG CANDIDATES")

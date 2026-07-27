@@ -63,7 +63,7 @@ def test_the_benchmark_is_byte_stable_for_the_same_version_and_seed():
     assert first == second
 
 
-def test_dag_benchmark_covers_every_held_out_form_for_both_factories():
+def test_dag_benchmark_covers_every_held_out_form_for_all_three_factories():
     selected = benchmark.dag_cases(DATA)
     assert len(selected) == benchmark.DAG_SIZE
     assert {case.target_id for case in selected} == set(benchmark.DAG_TARGETS)
@@ -78,7 +78,7 @@ def test_dag_benchmark_covers_every_held_out_form_for_both_factories():
     )
     assert len({case.record()["prompt"] for case in selected}) == len(selected)
     assert all(case.benchmark == benchmark.DAG_VERSION for case in selected)
-    assert benchmark.DAG_VARIANTS == 2
+    assert benchmark.DAG_VARIANTS == 1
 
 
 @pytest.mark.parametrize("name", benchmark.DAG_TARGETS)
@@ -99,9 +99,9 @@ def test_dag_holdout_leaves_twenty_four_route_forms_per_target_for_training(name
 
 def test_a_perfect_dag_run_reports_every_layout(repeated_dag_samples):
     result = benchmark.evaluate(repeated_dag_samples, DATA, iterations=20)
-    assert (result["samples"], result["prompts"], result["factory_prompts"]) == (64, 32, 32)
-    assert len(result["by_target"]) == 2
-    assert len(result["by_layout"]) == 16
+    assert (result["samples"], result["prompts"], result["factory_prompts"]) == (48, 24, 24)
+    assert len(result["by_target"]) == 3
+    assert len(result["by_layout"]) == 24
     assert result["summary"]["mean_flow"] == 1.0
 
 

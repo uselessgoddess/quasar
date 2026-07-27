@@ -372,8 +372,11 @@ def modules(
     placement is solved. Green science is the first admitted example: gears are
     shared by the inserter and transport-belt branches, while the inserter needs
     circuits, gears, and iron plate. Power switch is the second: cable feeds both
-    circuits and the final three-ingredient stage. Their generators route those
-    cross-edges explicitly instead of pretending the generic stack can.
+    circuits and the final three-ingredient stage. Fast splitter is the third
+    and first double diamond: circuits and gears are both shared, and both the
+    splitter and fast-splitter stages join three ingredients. Their generators
+    route those cross-edges explicitly instead of pretending the generic stack
+    can.
 
     Every boundary from two stages up to `depth` is offered, because they are
     different modules and not different qualities of the same one: a player who
@@ -407,6 +410,7 @@ def modules(
         supply = ("iron-plate", "copper-plate")
         factories = (
             ("power-switch", 3),
+            ("fast-splitter", 4),
             ("logistic-science-pack", 4),
         )
         for product, required_depth in factories:

@@ -759,7 +759,8 @@ class FactoryForm:
     canonical layout.  These four axes survive canonicalisation: the space
     between machines, spare belt at the port edge, and two DAG-specific route
     choices.  Green science uses the booleans as sibling orders; power switch
-    uses them as cable-machine offset and circuit/final order.
+    uses them as cable-machine offset and circuit/final order; fast splitter
+    uses them as gear-machine height and double-join column.
     """
 
     spacing: int
@@ -775,6 +776,10 @@ class FactoryForm:
 
     def name_for(self, product: str) -> str:
         """A route label whose booleans describe this target's actual geometry."""
+        if product == "fast-splitter":
+            gear = "gear-low" if self.upstream_swapped else "gear-high"
+            join = "join-left" if self.middle_swapped else "join-right"
+            return f"space-{self.spacing}-margin-{self.margin}-{gear}-{join}"
         if product == "power-switch":
             cable = "cable-offset" if self.upstream_swapped else "cable-edge"
             downstream = "circuit-right" if self.middle_swapped else "circuit-left"
@@ -994,15 +999,19 @@ def _factory(
     layout: Layout,
     form: FactoryForm,
 ) -> tuple[Blueprint, list[Port], tuple]:
-    """One of 32 layouts of the first diamond DAG: green science from plates.
+    """One of 32 layouts of an explicitly supported recipe DAG.
 
-    The conveyor graph stays semantically equivalent while spacing, edge
-    margin, and the positions of both pairs of sibling recipes vary.  These are
-    not rotations or reflections: canonicalisation keeps all 32 apart.  Gears
-    still feed both middle stages, and the three-ingredient inserter still
-    receives iron from the second belt.
+    Each target keeps the same recipe graph while spacing, edge margin, and two
+    target-specific route choices vary. These are not rotations or reflections:
+    canonicalisation keeps all 32 apart.
     """
     del layout
+    if (
+        target.product == "fast-splitter"
+        and target.supply == ("iron-plate", "copper-plate")
+        and target.depth == 4
+    ):
+        return _fast_splitter_factory(rng, data, target, form)
     if (
         target.product == "power-switch"
         and target.supply == ("iron-plate", "copper-plate")
@@ -1190,6 +1199,130 @@ def _power_switch_factory(
         output,
     ]
     return canvas.build("power-switch factory"), ports, unit.steps()
+
+
+def _fast_splitter_factory(
+    rng: random.Random,
+    data: Data,
+    target: planner.Module,
+    form: FactoryForm,
+) -> tuple[Blueprint, list[Port], tuple]:
+    """A compact double diamond with two shared intermediates.
+
+    Circuits feed both the splitter and final fast-splitter. Gears feed the
+    transport-belt stage and, on the iron-and-gear trunk, the final stage.
+    The splitter joins circuits, belts, and iron; the final stage joins the
+    splitter, circuits, and gears. Keeping each trunk to at most two item types
+    makes both three-ingredient joins real multi-belt problems.
+
+    The layout stays below the model's 512-token context by reusing the trunks:
+    the circuit belt passes the splitter and then receives its output before it
+    enters the final machine, while the iron-and-gear trunk feeds the gear,
+    transport-belt, splitter, and final stages. Spacing separates the two
+    upstream columns, margin moves the left column off the port edge,
+    ``upstream_swapped`` lowers the gear machine, and ``middle_swapped`` moves
+    both joins left. All four axes survive canonicalisation.
+    """
+    unit = planner.solve(data, target.product, target.supply, rate=1e-9, depth=4)
+    stages = {stage.product: stage for stage in unit.stages}
+    tier = _tier(rng)
+    belt = BELTS[tier]
+    underground = UNDERGROUNDS[tier]
+    inserter = INSERTERS[min(tier + 1, len(INSERTERS) - 1)]
+    canvas = Canvas.new(data)
+
+    left_x = form.margin
+    join_x = 6 if form.middle_swapped else 7
+    right_x = 12 + form.spacing
+    edge_x = right_x + 4
+    trunk_x = join_x + 4
+    gear_y = 3 if form.upstream_swapped else 2
+
+    # Copper enters the cable stage. Cable joins a second iron port on the
+    # one- or two-tile feed into the circuit stage.
+    if left_x:
+        canvas.line(belt, 0, 0, left_x, EAST)
+        canvas.line(belt, 0, 6, left_x, EAST)
+    canvas.place(belt, left_x, 0, SOUTH)
+    canvas.place(belt, left_x, 6, SOUTH)
+    cable = stages["copper-cable"]
+    canvas.place(inserter, left_x, 1, SOUTH)
+    canvas.place(cable.machine, left_x, 2, recipe=cable.recipe)
+    canvas.place(inserter, left_x, 5, SOUTH)
+    circuit = stages["electronic-circuit"]
+    canvas.place(inserter, left_x, 7, SOUTH)
+    canvas.place(circuit.machine, left_x, 8, recipe=circuit.recipe)
+
+    # One north-edge iron trunk first feeds the gear stage, receives its output,
+    # then feeds the transport-belt stage and the final fast-splitter. The
+    # splitter taps the same trunk below an underground crossing.
+    canvas.line(belt, edge_x, 0, 9, SOUTH)
+    gear = stages["iron-gear-wheel"]
+    canvas.place(inserter, right_x + 3, gear_y, WEST)
+    canvas.place(gear.machine, right_x, gear_y, recipe=gear.recipe)
+    canvas.place(inserter, right_x + 3, gear_y + 2, EAST)
+    transport = stages["transport-belt"]
+    canvas.place(inserter, right_x + 3, 9, WEST)
+    canvas.place(transport.machine, right_x, 8, recipe=transport.recipe)
+
+    # Branch the trunk above the transport-belt machine. The edge run continues
+    # into that machine, while an inserter copies both iron and gears onto the
+    # cross-edge run for the final machine and splitter. Branching here avoids
+    # routing a belt through the transport-belt input inserter.
+    canvas.place(belt, edge_x, 9, WEST)
+    canvas.place(inserter, edge_x - 1, 7, WEST)
+    canvas.line(belt, edge_x - 2, 7, edge_x - trunk_x - 2, WEST)
+    canvas.line(belt, trunk_x, 7, 3, SOUTH)
+
+    # Duck under the transport-belt output before continuing to the splitter's
+    # side inserter.
+    canvas.place(underground, trunk_x, 10, SOUTH, flow="input")
+    canvas.place(underground, trunk_x, 13, SOUTH, flow="output")
+    canvas.place(belt, trunk_x, 14, SOUTH)
+    canvas.place(belt, trunk_x, 15, WEST)
+
+    # Circuit travels east to the splitter. The last tile turns north: after
+    # feeding the splitter it carries circuit plus splitter output into the
+    # final machine, so one cross-edge belt serves both joins.
+    canvas.place(inserter, left_x, 11, SOUTH)
+    canvas.line(belt, left_x, 12, join_x - left_x + 1, EAST)
+    canvas.place(belt, join_x + 1, 12, NORTH)
+
+    # Transport belt approaches from the other side. Its last tile faces the
+    # input inserter rather than the circuit trunk, preventing three item types
+    # from mixing at the centre.
+    canvas.place(inserter, right_x, 11, SOUTH)
+    canvas.line(belt, right_x, 12, right_x - join_x - 2, WEST)
+    canvas.place(belt, join_x + 2, 12, SOUTH)
+
+    splitter = stages["splitter"]
+    canvas.place(inserter, join_x, 13, SOUTH)
+    canvas.place(inserter, join_x + 2, 13, SOUTH)
+    canvas.place(splitter.machine, join_x, 14, recipe=splitter.recipe)
+    canvas.place(inserter, join_x + 3, 15, WEST)
+    canvas.place(inserter, join_x + 1, 13, NORTH)
+
+    # The final machine receives circuit plus splitter from below and gears from
+    # the right. Its output leaves through an independent north-edge belt.
+    final = stages["fast-splitter"]
+    canvas.place(final.machine, join_x, 8, recipe=final.recipe)
+    canvas.place(inserter, join_x + 1, 11, NORTH)
+    canvas.place(inserter, join_x + 3, 9, WEST)
+    canvas.place(inserter, join_x, 7, NORTH)
+    canvas.line(belt, join_x, 6, 7, NORTH)
+
+    # Two connected substations cover the 17-20 by 17 design without spending
+    # the sequence budget on rows of poles.
+    canvas.place("substation", 8, 1)
+    canvas.place("substation", 3, 13)
+
+    ports = [
+        Port("in", "copper-plate", 0, 0, "w"),
+        Port("in", "iron-plate", 0, 6, "w"),
+        Port("in", "iron-plate", edge_x, 0, "n"),
+        Port("out", "fast-splitter", join_x, 0, "n"),
+    ]
+    return canvas.build("fast-splitter factory"), ports, unit.steps()
 
 
 @dataclass(frozen=True)

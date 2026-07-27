@@ -147,7 +147,11 @@ def test_every_catalogued_module_survives_its_own_filters():
             assert unit.raws_of(unit.stages[-1]) == ()
         else:
             assert module.shape == "factory", module
-            assert module.product in {"logistic-science-pack", "power-switch"}
+            assert module.product in {
+                "fast-splitter",
+                "logistic-science-pack",
+                "power-switch",
+            }
 
 
 def test_the_catalogue_holds_at_least_five_branching_chains():
@@ -208,6 +212,37 @@ def test_power_switch_gets_the_second_explicit_factory_layout():
         module
         for module in plan.modules(DATA, depth=4)
         if module.product == "power-switch" and module.supply == PLATES
+    )
+    assert target.shape == "factory"
+
+
+def test_fast_splitter_gets_the_third_explicit_factory_layout():
+    """DAG3 has two shared intermediates and two three-item joins."""
+    unit = plan.solve(DATA, "fast-splitter", PLATES, rate=1e-9, depth=4)
+    stages = {stage.product: stage for stage in unit.stages}
+    assert tuple(stages) == (
+        "copper-cable",
+        "electronic-circuit",
+        "iron-gear-wheel",
+        "transport-belt",
+        "splitter",
+        "fast-splitter",
+    )
+    assert set(stages["splitter"].ingredients) == {
+        "electronic-circuit",
+        "iron-plate",
+        "transport-belt",
+    }
+    assert set(stages["fast-splitter"].ingredients) == {
+        "electronic-circuit",
+        "iron-gear-wheel",
+        "splitter",
+    }
+    assert plan.fork(unit) is None
+    target = next(
+        module
+        for module in plan.modules(DATA, depth=4)
+        if module.product == "fast-splitter" and module.supply == PLATES
     )
     assert target.shape == "factory"
 

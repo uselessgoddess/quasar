@@ -119,6 +119,7 @@ jobs:
   # exact Burn/CubeCL/Vulkan stack can reach RDNA4 matrix throughput at all.
   # Precision work is gated on these numbers instead of a global dtype guess.
   gpu-benchmark:
+    needs: backend-spike
     runs-on: self-hosted
     timeout-minutes: 60
     steps:

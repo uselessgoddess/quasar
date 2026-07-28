@@ -72,7 +72,7 @@ run_arm vulkan \
 run_arm hipblaslt target/hipblaslt_backend_spike
 
 for log in "$log_dir/vulkan.log" "$log_dir/hipblaslt.log"; do
-    grep -Eq '^precision .*loss_scale=1024([.]0)? .*nonfinite_count=0 ' "$log"
+    grep -Eq '^precision .*loss_scale=1024([.]0+)? .*nonfinite_count=0 ' "$log"
 done
 
 reference_tflops=$(

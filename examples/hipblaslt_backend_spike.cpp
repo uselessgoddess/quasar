@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -338,8 +339,9 @@ int main()
         const double tflops =
             6.0 * rows * input_features * output_features / seconds.back() / 1.0e12;
         std::cout << "measured " << sample + 1 << "/"
-                  << (sample < 3 ? 3 : 9) << " seconds=" << seconds.back()
-                  << " throughput=" << tflops << " TFLOP/s\n";
+                  << (sample < 3 ? 3 : 9) << " seconds=" << std::fixed
+                  << std::setprecision(6) << seconds.back() << " throughput="
+                  << std::setprecision(2) << tflops << " TFLOP/s\n";
         if(seconds.size() == 3)
         {
             const auto [minimum, maximum] =
@@ -401,11 +403,12 @@ int main()
     const double activation_mean =
         activation_sum / static_cast<double>(host_output.size());
     const double grad_norm = std::sqrt(grad_square_sum);
-    std::cout << "precision activation_min=" << activation_min
-              << " activation_max=" << activation_max
+    std::cout << "precision activation_min=" << std::scientific << std::setprecision(6)
+              << activation_min << " activation_max=" << activation_max
               << " activation_mean=" << activation_mean << " grad_norm=" << grad_norm
-              << " loss_scale=" << loss_scale << " nonfinite_count=" << nonfinite_count
-              << " output_max_error=" << output_error
+              << " loss_scale=" << std::fixed << std::setprecision(1) << loss_scale
+              << " nonfinite_count=" << nonfinite_count << " output_max_error="
+              << std::scientific << std::setprecision(6) << output_error
               << " input_grad_max_error=" << input_grad_error
               << " weight_grad_max_error=" << weight_grad_error << '\n';
 
@@ -416,9 +419,10 @@ int main()
         6.0 * rows * input_features * output_features / median_seconds / 1.0e12;
     std::cout << "result backend=hipBLASLt dtype=F16 rows=" << rows << " shape="
               << input_features << 'x' << output_features << " samples=" << seconds.size()
-              << " median_seconds=" << median_seconds << " min_seconds=" << *minimum
-              << " max_seconds=" << *maximum << " spread=" << spread
-              << "% throughput=" << tflops << " TFLOP/s\n";
+              << " median_seconds=" << std::fixed << std::setprecision(6)
+              << median_seconds << " min_seconds=" << *minimum
+              << " max_seconds=" << *maximum << " spread=" << std::setprecision(2)
+              << spread << "% throughput=" << tflops << " TFLOP/s\n";
 
     if(nonfinite_count != 0 || output_error > 1.0e-2F || input_grad_error > 1.0e-2F
        || weight_grad_error > 1.0e-2F)

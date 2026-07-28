@@ -36,12 +36,67 @@ struct Args {
     max_steps: usize,
     #[arg(long, value_enum, default_value_t = Dtype::F32)]
     dtype: Dtype,
+    /// Explicit compute dtype for the output-head GEMM; everything else stays
+    /// in the device dtype (fp32 in the paired precision experiment).
+    #[arg(long, value_enum)]
+    head_dtype: Option<HeadDtype>,
     #[arg(long, value_enum, default_value_t = Ssd::Serial)]
     ssd: Ssd,
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     checkpointing: bool,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     muon: bool,
+    /// Run one synchronized precision diagnostic before warm-up. This is never
+    /// included in a measured step.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    precision_diagnostics: bool,
+    /// Generate a different deterministic batch for every accumulation pass.
+    /// This is for loss-trajectory gates; host-to-device copies make it
+    /// intentionally unsuitable for a throughput claim.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    vary_tokens: bool,
+}
+
+/// Minimal dynamic scaler for the fp16 output-head experiment.
+///
+/// The scaler starts conservatively, halves immediately after a non-finite
+/// optimizer step, and grows only after a long clean window. The benchmark
+/// rejects any non-finite step, but keeping the state transition here makes the
+/// precision seam usable for a longer quality run without pretending a fixed
+/// multiplier is dynamic loss scaling.
+#[derive(Clone, Copy, Debug)]
+struct DynamicLossScaler {
+    scale: f64,
+    finite_steps: usize,
+    growth_interval: usize,
+}
+
+impl DynamicLossScaler {
+    const INITIAL: f64 = 1024.0;
+    const MIN: f64 = 1.0;
+    const MAX: f64 = 65536.0;
+
+    fn new(growth_interval: usize) -> Self {
+        assert!(growth_interval > 0, "growth interval must be positive");
+        Self { scale: Self::INITIAL, finite_steps: 0, growth_interval }
+    }
+
+    fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    fn update(&mut self, finite: bool) {
+        if finite {
+            self.finite_steps += 1;
+            if self.finite_steps == self.growth_interval {
+                self.scale = (self.scale * 2.0).min(Self::MAX);
+                self.finite_steps = 0;
+            }
+        } else {
+            self.scale = (self.scale / 2.0).max(Self::MIN);
+            self.finite_steps = 0;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -54,6 +109,12 @@ enum Ssd {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Dtype {
     F32,
+    F16,
+    Bf16,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum HeadDtype {
     F16,
     Bf16,
 }
@@ -89,6 +150,15 @@ impl From<Dtype> for FloatDType {
     }
 }
 
+impl From<HeadDtype> for FloatDType {
+    fn from(value: HeadDtype) -> Self {
+        match value {
+            HeadDtype::F16 => Self::F16,
+            HeadDtype::Bf16 => Self::BF16,
+        }
+    }
+}
+
 impl From<Ssd> for SsdMode {
     fn from(value: Ssd) -> Self {
         match value {
@@ -114,7 +184,12 @@ fn main() -> Result<()> {
     device.seed(1337);
 
     let ssd_mode = SsdMode::from(args.ssd);
-    let mut model = Quasar::new_with_ssd(&cfg, ssd_mode.clone(), &device);
+    let mut model = Quasar::new_with_ssd_and_head_dtype(
+        &cfg,
+        ssd_mode.clone(),
+        args.head_dtype.map(FloatDType::from),
+        &device,
+    );
     let run = Run::new()
         .with_micro_batch(args.micro_batch)
         .with_accum(args.accum)
@@ -124,34 +199,80 @@ fn main() -> Result<()> {
     let mut optim = Optim::new(&run, &model);
     let (input, target) = tokens(&cfg, args.micro_batch, &device);
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
+    let mut loss_scaler =
+        matches!(args.head_dtype, Some(HeadDtype::F16)).then(|| DynamicLossScaler::new(200));
 
     println!(
-        "bench device={base_device:?} model={:?} dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
+        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} vary_tokens={} tokens/step={tokens_per_step}",
         args.model,
         args.dtype,
+        args.head_dtype,
         args.micro_batch,
         args.accum,
         args.ssd,
         args.checkpointing,
-        args.muon
+        args.muon,
+        args.vary_tokens
     );
 
+    if args.precision_diagnostics {
+        let loss_scale = loss_scaler.as_ref().map_or(1.0, DynamicLossScaler::scale);
+        let diagnostics = model.precision_diagnostics(input.clone(), target.clone(), loss_scale);
+        println!(
+            "precision activation_min={:.6e} activation_max={:.6e} activation_mean={:.6e} \
+             grad_norm={:.6e} loss_scale={:.1} nonfinite_count={} loss={:.6}",
+            diagnostics.activation_min,
+            diagnostics.activation_max,
+            diagnostics.activation_mean,
+            diagnostics.grad_norm,
+            diagnostics.loss_scale,
+            diagnostics.nonfinite_count,
+            diagnostics.loss
+        );
+        anyhow::ensure!(
+            diagnostics.nonfinite_count == 0 && diagnostics.loss.is_finite(),
+            "precision diagnostic found non-finite values"
+        );
+    }
+
     for step in 0..args.warmup {
-        let (next, loss) = optimizer_step(model, &mut optim, &input, &target, args.accum, &device)?;
+        let (next, loss, loss_scale) = optimizer_step(
+            model,
+            &mut optim,
+            &input,
+            &target,
+            &cfg,
+            args.accum,
+            step,
+            args.vary_tokens,
+            loss_scaler.as_mut(),
+            &device,
+        )?;
         model = next;
-        println!("warmup {}/{} loss={loss:.4}", step + 1, args.warmup);
+        println!("warmup {}/{} loss={loss:.4} loss_scale={loss_scale:.0}", step + 1, args.warmup);
     }
 
     let mut seconds = Vec::with_capacity(args.max_steps);
     for step in 0..args.max_steps {
         let started = Instant::now();
-        let (next, loss) = optimizer_step(model, &mut optim, &input, &target, args.accum, &device)?;
+        let (next, loss, loss_scale) = optimizer_step(
+            model,
+            &mut optim,
+            &input,
+            &target,
+            &cfg,
+            args.accum,
+            args.warmup + step,
+            args.vary_tokens,
+            loss_scaler.as_mut(),
+            &device,
+        )?;
         model = next;
         let elapsed = started.elapsed().as_secs_f64();
         let throughput = tokens_per_step as f64 / elapsed;
         let planned_steps = if step < args.steps { args.steps } else { args.max_steps };
         println!(
-            "measured {}/{} loss={loss:.4} seconds={elapsed:.3} throughput={throughput:.0} tok/s",
+            "measured {}/{} loss={loss:.4} loss_scale={loss_scale:.0} seconds={elapsed:.3} throughput={throughput:.0} tok/s",
             step + 1,
             planned_steps
         );
@@ -222,6 +343,35 @@ mod tests {
         assert!(summary.spread_percent < 3.0);
         assert!(!summary.needs_extended_window());
     }
+
+    #[test]
+    fn trajectory_tokens_are_reproducible_but_change_between_micro_batches() {
+        let cfg = BenchModel::TinyTurbo.config();
+        let first = token_values_for_stream(&cfg, 32, 7);
+        let again = token_values_for_stream(&cfg, 32, 7);
+        let next = token_values_for_stream(&cfg, 32, 8);
+
+        assert_eq!(first, again);
+        assert_ne!(first, next);
+        assert!(first.iter().all(|token| *token >= 0 && *token < cfg.vocab_size as i32));
+        assert!(
+            first.windows(2).all(|pair| pair[1] == (pair[0] + 1) % cfg.vocab_size as i32),
+            "the trajectory must retain one learnable next-token relation"
+        );
+    }
+
+    #[test]
+    fn loss_scaler_backs_off_and_grows_after_a_clean_window() {
+        let mut scaler = DynamicLossScaler::new(2);
+        assert_eq!(scaler.scale(), 1024.0);
+
+        scaler.update(false);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 1024.0);
+    }
 }
 
 fn tokens(cfg: &Model, batch: usize, device: &Device) -> (Tensor<2, Int>, Tensor<2, Int>) {
@@ -232,28 +382,68 @@ fn tokens(cfg: &Model, batch: usize, device: &Device) -> (Tensor<2, Int>, Tensor
     (Tensor::from_data(input, device), Tensor::from_data(target, device))
 }
 
+fn tokens_for_stream(
+    cfg: &Model,
+    batch: usize,
+    stream: usize,
+    device: &Device,
+) -> (Tensor<2, Int>, Tensor<2, Int>) {
+    let len = batch * cfg.seq_len;
+    let data = token_values_for_stream(cfg, len, stream);
+    let input = TensorData::new(data[..len].to_vec(), [batch, cfg.seq_len]);
+    let target = TensorData::new(data[1..].to_vec(), [batch, cfg.seq_len]);
+    (Tensor::from_data(input, device), Tensor::from_data(target, device))
+}
+
+fn token_values_for_stream(cfg: &Model, len: usize, stream: usize) -> Vec<i32> {
+    // Every sample teaches the same learnable next-token relation while the
+    // coprime stream offset prevents optimizer steps from replaying one batch.
+    let vocab = cfg.vocab_size as u64;
+    let start = (stream as u64).wrapping_mul(7_919).wrapping_add(1_337) % vocab;
+    (0..=len).map(|position| (start + position as u64) % vocab).map(|token| token as i32).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn optimizer_step(
     mut model: Quasar,
     optim: &mut Optim,
     input: &Tensor<2, Int>,
     target: &Tensor<2, Int>,
+    cfg: &Model,
     accum: usize,
+    optimizer_step: usize,
+    vary_tokens: bool,
+    loss_scaler: Option<&mut DynamicLossScaler>,
     device: &Device,
-) -> Result<(Quasar, f32)> {
+) -> Result<(Quasar, f32, f64)> {
     let mut logged_loss = None;
-    for _ in 0..accum {
-        let loss = model.loss(input.clone(), target.clone());
+    let loss_scale = loss_scaler.as_ref().map_or(1.0, |scaler| scaler.scale());
+    for micro_step in 0..accum {
+        let (input, target) = if vary_tokens {
+            tokens_for_stream(cfg, input.dims()[0], optimizer_step * accum + micro_step, device)
+        } else {
+            (input.clone(), target.clone())
+        };
+        let loss = model.loss(input, target);
         let nll = loss.nll.clone().detach();
         logged_loss = Some(match logged_loss.take() {
             Some(total) => total + nll,
             None => nll,
         });
-        let grads = loss.total.div_scalar(accum as f64).backward();
+        let grads = loss.total.div_scalar(accum as f64).mul_scalar(loss_scale).backward();
         optim.accumulate(&model, grads);
     }
-    model = optim.step(3e-3, model);
+    model = match loss_scaler {
+        Some(scaler) => {
+            let (model, finite) = optim.step_scaled(3e-3, model, loss_scale);
+            scaler.update(finite);
+            anyhow::ensure!(finite, "dynamic loss scaler found non-finite gradients");
+            model
+        }
+        None => optim.step(3e-3, model),
+    };
     device.sync()?;
     let loss = logged_loss.unwrap().div_scalar(accum as f64).into_scalar::<f32>();
     anyhow::ensure!(loss.is_finite(), "training produced a non-finite loss");
-    Ok((model, loss))
+    Ok((model, loss, loss_scale))
 }

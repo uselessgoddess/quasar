@@ -103,7 +103,7 @@ impl Mamba3 {
         });
 
         // ── Step 1: In-projection ─────────────────────────────────────────────
-        let proj_bsd = self.in_proj.forward(input_bsm);
+        let proj_bsd = self.project_linear(&self.in_proj, input_bsm);
         let bc_size = ngroups * state_rank * mimo_rank;
 
         #[rustfmt::skip]
@@ -379,7 +379,7 @@ impl Mamba3 {
         san(&y_bsi);
 
         // ── Out-projection ────────────────────────────────────────────────────
-        let out_bsm = self.out_proj.forward(y_bsi);
+        let out_bsm = self.project_linear(&self.out_proj, y_bsi);
         san(&out_bsm);
 
         // ── Update remaining cache fields ─────────────────────────────────────

@@ -13,11 +13,12 @@ use std::time::Instant;
 use burn::module::AutodiffModule;
 use burn::prelude::*;
 use burn::store::ModuleSnapshot;
+use burn::tensor::FloatDType;
 
 use crate::data::{Batcher, Shards};
 use crate::model::Quasar;
 use crate::train::checkpoint::{self, State};
-use crate::train::optim::Optim;
+use crate::train::optim::{DynamicLossScaler, Optim};
 use crate::train::schedule::Wsd;
 use crate::train::ui::Dashboard;
 use crate::{config, eval};
@@ -67,6 +68,19 @@ pub struct Run {
     /// and is faster when they fit. Optional so older run files remain readable.
     #[config(default = "None")]
     pub ssd_mode: Option<config::SsdMode>,
+    /// Reduced compute dtype for the output-head GEMM only. Parameters,
+    /// optimizer state, hidden states, logits, softmax and loss remain fp32.
+    /// Optional so older run files and unmeasured presets remain fp32.
+    #[config(default = "None")]
+    pub head_dtype: Option<config::HeadDtype>,
+    /// Reduced compute dtype for the three FFN GEMMs in every block. Master
+    /// weights, norms, SwiGLU elementwise math and residuals stay fp32.
+    #[config(default = "None")]
+    pub ffn_dtype: Option<config::FfnDtype>,
+    /// Reduced compute dtype for Mamba input/output projection GEMMs. Master
+    /// weights, SSD coefficient/state math, norms and residuals stay fp32.
+    #[config(default = "None")]
+    pub mamba_dtype: Option<config::MambaDtype>,
     #[config(default = 1337)]
     pub seed: u64,
     #[config(default = 20)]
@@ -102,6 +116,12 @@ pub enum Error {
         step: usize,
         params: Vec<String>,
     },
+    /// Even the minimum fp16 loss scale produced a non-finite gradient. The
+    /// rejected update never reached either optimizer or the model.
+    NonfiniteGradient {
+        step: usize,
+        loss_scale: f64,
+    },
 }
 
 /// Train `cfg` on the shards under `data`, checkpointing into `out`.
@@ -130,19 +150,39 @@ pub fn run(
         return Err(Error::Vocab { config: cfg.vocab_size, shards });
     }
 
-    let mut model = Quasar::new_with_ssd(cfg, run.ssd_mode.clone().unwrap_or_default(), &device);
+    let head_dtype = run.head_dtype.as_ref().map(|dtype| match dtype {
+        config::HeadDtype::F16 => FloatDType::F16,
+    });
+    let ffn_dtype = run.ffn_dtype.as_ref().map(|dtype| match dtype {
+        config::FfnDtype::F16 => FloatDType::F16,
+    });
+    let mamba_dtype = run.mamba_dtype.as_ref().map(|dtype| match dtype {
+        config::MambaDtype::F16 => FloatDType::F16,
+    });
+    let mut model = Quasar::new_with_ssd_and_projection_dtypes(
+        cfg,
+        run.ssd_mode.clone().unwrap_or_default(),
+        head_dtype,
+        ffn_dtype,
+        mamba_dtype,
+        &device,
+    );
     let mut optim = Optim::new(run, &model);
 
     std::fs::create_dir_all(out).map_err(Error::Io)?;
     cfg.save(out.join("model.json")).map_err(Error::Io)?;
     run.save(out.join("run.json")).map_err(Error::Io)?;
 
-    let mut state = State { step: 0, tokens: 0 };
+    let mut state = State { step: 0, tokens: 0, loss_scaler: None };
     if let Some(dir) = checkpoint::latest(out) {
         let (loaded, resumed) = checkpoint::load(&dir, &mut model, optim)?;
         (optim, state) = (loaded, resumed);
         println!("resuming {} at step {}", dir.display(), state.step);
     }
+    let mut loss_scaler =
+        (run.head_dtype.is_some() || run.ffn_dtype.is_some() || run.mamba_dtype.is_some())
+            .then(|| state.loss_scaler.unwrap_or_else(|| DynamicLossScaler::new(200)));
+    state.loss_scaler = loss_scaler;
 
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
     let per_step = (run.micro_batch * run.accum * cfg.seq_len) as u64;
@@ -154,6 +194,23 @@ pub fn run(
         total_tokens as f64 / 1e9,
         per_step
     );
+    if let Some(scaler) = loss_scaler {
+        let mut seams = Vec::new();
+        if run.head_dtype.is_some() {
+            seams.push("output head");
+        }
+        if run.ffn_dtype.is_some() {
+            seams.push("FFN projections");
+        }
+        if run.mamba_dtype.is_some() {
+            seams.push("Mamba projections");
+        }
+        println!(
+            "training precision: fp16 {} | fp32 master/norm/residual/SSD state/logits/loss | loss scale {:.0}",
+            seams.join(" + "),
+            scaler.scale()
+        );
+    }
     let mut dashboard = Dashboard::new(run.steps, state.step);
     let tracing = trace_every();
 
@@ -169,28 +226,51 @@ pub fn run(
         // Reading a loss scalar blocks until the device catches up, so it is
         // read on logging steps only; the rest never leave the queue.
         let logging = due(step, run.log_every);
-        let mut logged_loss = None;
+        let logged_loss = loop {
+            let loss_scale = loss_scaler.as_ref().map_or(1.0, DynamicLossScaler::scale);
+            let mut logged_loss = None;
 
-        for micro in 0..run.accum {
-            let batch = train.train((step * run.accum + micro) as u64, &device);
-            let loss = model.loss(batch.input, batch.target);
-            if logging {
-                // Keep the reduction on the device. Reading every micro-batch
-                // separately serialises the GPU queue `accum` times (96 times
-                // in the report that prompted issue #7).
-                let nll = loss.nll.clone().detach();
-                logged_loss = Some(match logged_loss.take() {
-                    Some(total) => total + nll,
-                    None => nll,
-                });
+            for micro in 0..run.accum {
+                let batch = train.train((step * run.accum + micro) as u64, &device);
+                let loss = model.loss(batch.input, batch.target);
+                if logging {
+                    // Keep the reduction on the device. Reading every micro-batch
+                    // separately serialises the GPU queue `accum` times (96 times
+                    // in the report that prompted issue #7).
+                    let nll = loss.nll.clone().detach();
+                    logged_loss = Some(match logged_loss.take() {
+                        Some(total) => total + nll,
+                        None => nll,
+                    });
+                }
+                // Scaling here rather than after accumulating keeps the gradient
+                // of an accumulated step identical to that of one big batch.
+                let total = loss.total.div_scalar(run.accum as f64);
+                let total =
+                    if loss_scaler.is_some() { total.mul_scalar(loss_scale) } else { total };
+                optim.accumulate(&model, total.backward());
             }
-            // Scaling here rather than after accumulating keeps the gradient of
-            // an accumulated step identical to that of one big batch.
-            let step = loss.total.div_scalar(run.accum as f64).backward();
-            optim.accumulate(&model, step);
-        }
-        model = optim.step(lr, model);
-        state = State { step: step + 1, tokens: state.tokens + per_step };
+
+            let Some(scaler) = loss_scaler.as_mut() else {
+                model = optim.step(lr, model);
+                break logged_loss;
+            };
+            let (next, finite) = optim.step_scaled(lr, model, loss_scale);
+            model = next;
+            scaler.update(finite);
+            if finite {
+                break logged_loss;
+            }
+            if loss_scale <= DynamicLossScaler::MIN {
+                return Err(Error::NonfiniteGradient { step: step + 1, loss_scale });
+            }
+            println!(
+                "non-finite gradient at step {}; discarded update and retrying at loss scale {:.0}",
+                step + 1,
+                scaler.scale()
+            );
+        };
+        state = State { step: step + 1, tokens: state.tokens + per_step, loss_scaler };
         window.steps += 1;
 
         if logging {
@@ -442,6 +522,11 @@ impl std::fmt::Display for Error {
                     "\nlower --lr, lengthen --warmup, or take the hidden matrices off Muon with --muon false"
                 )
             }
+            Self::NonfiniteGradient { step, loss_scale } => write!(
+                f,
+                "training produced non-finite gradients at step {step} with minimum loss scale \
+                 {loss_scale}; the update was discarded"
+            ),
         }
     }
 }
@@ -492,10 +577,16 @@ mod tests {
         let run = Run::new();
         let mut json = serde_json::to_value(&run).unwrap();
         json.as_object_mut().unwrap().remove("ssd_mode");
+        json.as_object_mut().unwrap().remove("head_dtype");
+        json.as_object_mut().unwrap().remove("ffn_dtype");
+        json.as_object_mut().unwrap().remove("mamba_dtype");
 
         let loaded: Run = serde_json::from_value(json).unwrap();
 
         assert_eq!(loaded.ssd_mode, None);
+        assert_eq!(loaded.head_dtype, None);
+        assert_eq!(loaded.ffn_dtype, None);
+        assert_eq!(loaded.mamba_dtype, None);
     }
 
     #[test]
@@ -522,6 +613,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(checkpoint::latest(out.path()).unwrap(), checkpoint::dir(out.path(), 2));
+    }
+
+    #[test]
+    fn a_short_fp16_projection_run_leaves_a_finite_resumable_checkpoint() {
+        let data = tempfile::tempdir().unwrap();
+        shards(&data.path().join("train"));
+        shards(&data.path().join("valid"));
+        let out = tempfile::tempdir().unwrap();
+        let run = tiny_run()
+            .with_head_dtype(Some(config::HeadDtype::F16))
+            .with_ffn_dtype(Some(config::FfnDtype::F16))
+            .with_mamba_dtype(Some(config::MambaDtype::F16));
+
+        super::run(&config::Model::toy(), &run, data.path(), out.path(), &Device::default())
+            .unwrap();
+
+        let dir = checkpoint::latest(out.path()).unwrap();
+        let state: State =
+            serde_json::from_reader(std::fs::File::open(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state.step, 2);
+        assert_eq!(state.loss_scaler.unwrap().scale(), DynamicLossScaler::INITIAL);
     }
 
     #[test]

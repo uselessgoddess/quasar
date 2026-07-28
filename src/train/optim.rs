@@ -17,16 +17,57 @@
 use std::path::Path;
 
 use burn::grad_clipping::GradientClippingConfig;
-use burn::module::ParamId;
+use burn::module::{Module, ModuleVisitor, Param, ParamId};
 use burn::optim::decay::WeightDecayConfig;
 use burn::optim::{
     AdamWConfig, AdjustLrFn, GradientsAccumulator, GradientsParams, ModuleOptimizer, MuonConfig,
 };
 use burn::store::{ModuleSnapshot, RecordError};
-use burn::tensor::Gradients;
+use burn::tensor::{Bool, Gradients, Tensor};
+use serde::{Deserialize, Serialize};
 
 use crate::model::Quasar;
 use crate::train::Run;
+
+/// Dynamic loss scale for the measured fp16 projection paths.
+///
+/// A non-finite step is discarded before either optimizer sees it. The scale
+/// then halves and the caller retries the same deterministic batch. A long
+/// clean window grows it again, bounded at both ends.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DynamicLossScaler {
+    scale: f64,
+    finite_steps: usize,
+    growth_interval: usize,
+}
+
+impl DynamicLossScaler {
+    pub const INITIAL: f64 = 1024.0;
+    pub const MIN: f64 = 1.0;
+    pub const MAX: f64 = 65536.0;
+
+    pub fn new(growth_interval: usize) -> Self {
+        assert!(growth_interval > 0, "growth interval must be positive");
+        Self { scale: Self::INITIAL, finite_steps: 0, growth_interval }
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    pub fn update(&mut self, finite: bool) {
+        if finite {
+            self.finite_steps += 1;
+            if self.finite_steps == self.growth_interval {
+                self.scale = (self.scale * 2.0).min(Self::MAX);
+                self.finite_steps = 0;
+            }
+        } else {
+            self.scale = (self.scale / 2.0).max(Self::MIN);
+            self.finite_steps = 0;
+        }
+    }
+}
 
 /// Both optimizers and the accumulator each of them feeds from.
 pub struct Optim {
@@ -72,11 +113,46 @@ impl Optim {
 
     /// Apply everything accumulated since the last step.
     pub fn step(&mut self, lr: f64, model: Quasar) -> Quasar {
+        let muon_grads = self.muon_grads.grads();
+        let adamw_grads = self.adamw_grads.grads();
+        self.apply(lr, model, muon_grads, adamw_grads)
+    }
+
+    /// Unscale accumulated gradients once per optimizer step, reject
+    /// non-finite values, and otherwise apply the same Muon/AdamW split.
+    ///
+    /// Delaying the unscale until after accumulation avoids adding a kernel
+    /// for every parameter to every micro-batch. The single all-finite scalar
+    /// read is also outside all forward/backward work.
+    pub fn step_scaled(&mut self, lr: f64, model: Quasar, loss_scale: f64) -> (Quasar, bool) {
+        assert!(
+            loss_scale.is_finite() && loss_scale > 0.0,
+            "loss scale must be finite and positive"
+        );
+        let mut finite = Vec::new();
+        let muon_grads = unscale(self.muon_grads.grads(), &model, loss_scale, &mut finite);
+        let adamw_grads = unscale(self.adamw_grads.grads(), &model, loss_scale, &mut finite);
+        let all_finite = !finite.is_empty() && Tensor::cat(finite, 0).all().into_scalar::<bool>();
+
+        if all_finite {
+            (self.apply(lr, model, muon_grads, adamw_grads), true)
+        } else {
+            (model, false)
+        }
+    }
+
+    fn apply(
+        &mut self,
+        lr: f64,
+        model: Quasar,
+        muon_grads: GradientsParams,
+        adamw_grads: GradientsParams,
+    ) -> Quasar {
         let model = match self.hidden.is_empty() {
             true => model,
-            false => self.muon.step(lr, model, self.muon_grads.grads()),
+            false => self.muon.step(lr, model, muon_grads),
         };
-        self.adamw.step(lr, model, self.adamw_grads.grads())
+        self.adamw.step(lr, model, adamw_grads)
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), RecordError> {
@@ -93,6 +169,33 @@ impl Optim {
             muon_grads,
             hidden,
         })
+    }
+}
+
+fn unscale(
+    mut grads: GradientsParams,
+    model: &Quasar,
+    loss_scale: f64,
+    finite: &mut Vec<Tensor<1, Bool>>,
+) -> GradientsParams {
+    model.visit(&mut GradientUnscaler { grads: &mut grads, inverse: 1.0 / loss_scale, finite });
+    grads
+}
+
+struct GradientUnscaler<'a> {
+    grads: &'a mut GradientsParams,
+    inverse: f64,
+    finite: &'a mut Vec<Tensor<1, Bool>>,
+}
+
+impl ModuleVisitor for GradientUnscaler<'_> {
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+        let Some(grad) = self.grads.remove::<D>(param.id) else {
+            return;
+        };
+        let grad = grad.mul_scalar(self.inverse);
+        self.finite.push(grad.clone().is_finite().all());
+        self.grads.register(param.id, grad);
     }
 }
 
@@ -163,5 +266,74 @@ mod tests {
             let step = was.iter().zip(&now).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
             assert!(step > 0.0, "{} never moved", before.full_path());
         }
+    }
+
+    #[test]
+    fn scaled_step_matches_the_unscaled_optimizer_path() {
+        let (device, run) = (Device::default().autodiff(), Run::new());
+        let reference = Quasar::new(&config::Model::toy(), &device);
+        let scaled = reference.clone();
+        let tokens = Tensor::<2, burn::tensor::Int>::zeros([2, 8], &device);
+
+        let mut reference_optim = Optim::new(&run, &reference);
+        let reference_grads = reference.loss(tokens.clone(), tokens.clone()).total.backward();
+        reference_optim.accumulate(&reference, reference_grads);
+        let reference = reference_optim.step(1e-2, reference);
+
+        let mut scaled_optim = Optim::new(&run, &scaled);
+        let scale = 1024.0;
+        let scaled_grads = scaled.loss(tokens.clone(), tokens).total.mul_scalar(scale).backward();
+        scaled_optim.accumulate(&scaled, scaled_grads);
+        let (scaled, finite) = scaled_optim.step_scaled(1e-2, scaled, scale);
+        assert!(finite);
+
+        for (reference, scaled) in
+            reference.collect(None, None, false).iter().zip(scaled.collect(None, None, false))
+        {
+            let reference_values = reference.to_data().unwrap().to_vec::<f32>().unwrap();
+            let scaled_values = scaled.to_data().unwrap().to_vec::<f32>().unwrap();
+            let delta = reference_values
+                .iter()
+                .zip(scaled_values)
+                .map(|(reference, scaled)| (reference - scaled).abs())
+                .fold(0.0, f32::max);
+            assert!(delta < 1e-6, "{} delta {delta}", reference.full_path());
+        }
+    }
+
+    #[test]
+    fn scaled_step_rejects_nonfinite_gradients_without_moving_the_model() {
+        let (device, run) = (Device::default().autodiff(), Run::new());
+        let model = Quasar::new(&config::Model::toy(), &device);
+        let before = model.clone().collect(None, None, false);
+        let tokens = Tensor::<2, burn::tensor::Int>::zeros([2, 8], &device);
+        let mut optim = Optim::new(&run, &model);
+
+        let grads = model.loss(tokens.clone(), tokens).total.mul_scalar(f64::NAN).backward();
+        optim.accumulate(&model, grads);
+        let (model, finite) = optim.step_scaled(1e-2, model, 1024.0);
+
+        assert!(!finite);
+        for (before, after) in before.iter().zip(model.collect(None, None, false)) {
+            assert_eq!(
+                before.to_data().unwrap().to_vec::<f32>().unwrap(),
+                after.to_data().unwrap().to_vec::<f32>().unwrap(),
+                "{} moved after a rejected step",
+                before.full_path()
+            );
+        }
+    }
+
+    #[test]
+    fn loss_scaler_backs_off_and_grows_after_a_clean_window() {
+        let mut scaler = DynamicLossScaler::new(2);
+        assert_eq!(scaler.scale(), 1024.0);
+
+        scaler.update(false);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 1024.0);
     }
 }

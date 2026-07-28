@@ -254,6 +254,44 @@ backend не выполняет. `base` тем более будет недоо�
 Подробный разбор наблюдения 40/60000 и ограничений burn-mamba находится в
 [`TRAINING_SPEED.md`](TRAINING_SPEED.md).
 
+### 4.1 Итоговая performance-стратегия для RDNA4
+
+P0/P1 issue #21 измерили production на 5.11 effective TFLOP/s и bf16/f16 GEMM
+roofline на 42–44 TFLOP/s. Точечный bf16 tied head дал 5.84 TFLOP/s и
+13.359 GiB, но нарушил loss gate (7.37% против допустимых 0.5%). Точный
+recomputed cross-entropy затем снизил память с 14.360 до 10.453 GiB, но
+замедлил full step с 5.13 до 4.61 TFLOP/s; batch 8×16 дал 2.05 TFLOP/s и
+15.852 GiB. Оба пути откатаны.
+
+Повтор того же минимального seam в f16 с dynamic loss scaling прошёл:
+**12 134 tok/s, 5.87 TFLOP/s и 12.111 GiB** против 10 548 tok/s, 5.10 TFLOP/s
+и 14.111 GiB у paired fp32. Следующий P4 gate добавил три FFN projection GEMM
+во всех 12 блоках и дал **14 679 tok/s, 7.10 TFLOP/s и 12.038 GiB** против
+12 146 tok/s, 5.87 TFLOP/s и 12.112 GiB у paired f16-head reference
+(+20.85%). Максимальное trailing-3 loss-отклонение составило 0.0060% при
+лимите 0.5%, non-finite count — ноль.
+
+P5 затем расширил seam только на Mamba input/output projections и дал
+**17 693 tok/s, 8.56 TFLOP/s и 11.835 GiB** против 14 593 tok/s,
+7.06 TFLOP/s и 12.038 GiB у точного paired head+FFN reference (+21.24%).
+Максимальное trailing-3 loss-отклонение снова составило 0.0060%, все 62
+training points сохранили scale 1024, non-finite count — ноль.
+
+Поэтому `tiny-turbo` использует f16 для tied output head, FFN и Mamba
+input/output projections; master weights, optimizer state, SSD coefficients,
+discretization, recurrent state, norms, residual stream, logits, softmax и
+loss остаются fp32. Dynamic-scaler state входит в checkpoint, а
+`--head-dtype fp32`, `--ffn-dtype fp32` и `--mamba-dtype fp32` независимо
+отключают пути.
+
+Эти результаты не разрешают глобальный reduced dtype. P5 всё ещё ниже
+20 TFLOP/s, поэтому model-level precision и мелкие elementwise fusion
+остановлены. Теперь действует backend pivot: fused head/CE kernel с fp32
+softmax/gradient accumulation и ограниченный spike HIP/hipBLASLt или Burn
+ROCm. Числа, A/B и причины решений находятся в
+[`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
+[`ROOFLINE.md`](ROOFLINE.md).
+
 ## 5. Данные
 
 Основной корпус — **FineWeb-Edu, `sample/10BT`** (parquet, ~28 GB). Причины:

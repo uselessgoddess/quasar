@@ -148,6 +148,18 @@ struct Overrides {
     /// SSD algorithm: serial retains intermediates for speed; recalculated saves memory.
     #[arg(long, value_enum)]
     ssd: Option<Ssd>,
+    /// Compute dtype of the output-head GEMM. `fp32` disables the measured
+    /// tiny-turbo fp16 default without changing stored weights or logits.
+    #[arg(long, value_enum)]
+    head_dtype: Option<HeadDtype>,
+    /// Compute dtype of the FFN projections. `fp32` disables the measured
+    /// tiny-turbo fp16 default while keeping norms and residuals in fp32.
+    #[arg(long, value_enum)]
+    ffn_dtype: Option<HeadDtype>,
+    /// Compute dtype of the Mamba input/output projections. `fp32` disables
+    /// the measured tiny-turbo default while SSD state math remains fp32.
+    #[arg(long, value_enum)]
+    mamba_dtype: Option<HeadDtype>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -155,6 +167,12 @@ enum Ssd {
     Minimal,
     Serial,
     Recalculated,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HeadDtype {
+    Fp32,
+    F16,
 }
 
 /// The model-shape knobs worth sweeping without editing a preset, because they
@@ -470,7 +488,10 @@ impl Preset {
                 .with_micro_batch(4)
                 .with_accum(32)
                 .with_checkpointing(false)
-                .with_ssd_mode(Some(config::SsdMode::Serial)),
+                .with_ssd_mode(Some(config::SsdMode::Serial))
+                .with_head_dtype(Some(config::HeadDtype::F16))
+                .with_ffn_dtype(Some(config::FfnDtype::F16))
+                .with_mamba_dtype(Some(config::MambaDtype::F16)),
             Self::FactorioNano => {
                 let cfg = config::factorio::nano();
                 let (micro, accum) = (32, 1);
@@ -553,6 +574,24 @@ impl Overrides {
                 Ssd::Recalculated => config::SsdMode::Recalculated,
             });
         }
+        if let Some(dtype) = self.head_dtype {
+            run.head_dtype = match dtype {
+                HeadDtype::Fp32 => None,
+                HeadDtype::F16 => Some(config::HeadDtype::F16),
+            };
+        }
+        if let Some(dtype) = self.ffn_dtype {
+            run.ffn_dtype = match dtype {
+                HeadDtype::Fp32 => None,
+                HeadDtype::F16 => Some(config::FfnDtype::F16),
+            };
+        }
+        if let Some(dtype) = self.mamba_dtype {
+            run.mamba_dtype = match dtype {
+                HeadDtype::Fp32 => None,
+                HeadDtype::F16 => Some(config::MambaDtype::F16),
+            };
+        }
         run
     }
 }
@@ -568,6 +607,9 @@ mod tests {
         assert_eq!(turbo.ssd_mode, Some(config::SsdMode::Serial));
         assert_eq!((turbo.micro_batch, turbo.accum), (4, 32));
         assert!(!turbo.checkpointing);
+        assert_eq!(turbo.head_dtype, Some(config::HeadDtype::F16));
+        assert_eq!(turbo.ffn_dtype, Some(config::FfnDtype::F16));
+        assert_eq!(turbo.mamba_dtype, Some(config::MambaDtype::F16));
 
         let nano = Preset::FactorioNano.run_defaults();
 
@@ -587,6 +629,9 @@ mod tests {
         for preset in [Preset::Tiny, Preset::Base, Preset::Toy] {
             let run = preset.run_defaults();
             assert_eq!(run.ssd_mode, None);
+            assert_eq!(run.head_dtype, None);
+            assert_eq!(run.ffn_dtype, None);
+            assert_eq!(run.mamba_dtype, None);
             assert_eq!((run.micro_batch, run.accum), (8, 16));
             assert!(run.checkpointing);
         }

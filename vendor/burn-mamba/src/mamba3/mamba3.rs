@@ -129,6 +129,7 @@ use burn::prelude::*;
 use burn::{
     module::{Module, Param},
     nn::{Initializer, Linear, LinearConfig},
+    tensor::{FloatDType, module::linear},
 };
 
 // ---------------------------------------------------------------------------
@@ -210,6 +211,12 @@ pub struct Mamba3 {
     /// Output projection: maps `d_inner → d_model`.
     pub out_proj: Linear,
 
+    /// Optional compute dtype for the input/output projection GEMMs only.
+    /// Projection outputs, SSD coefficients/state, norms and residuals remain
+    /// in fp32, as do the master parameters and optimizer state.
+    #[module(skip)]
+    projection_dtype: Option<FloatDType>,
+
     /// Optional learnable initial hidden state `h₀`.
     /// Shape: `[nheads, per_head_dim, state_rank]`
     pub init_state_hpr: Option<Param<Tensor<3>>>,
@@ -255,6 +262,28 @@ pub struct Mamba3 {
 }
 
 impl Mamba3 {
+    /// Cast only the input/output projection GEMMs to `dtype`.
+    pub fn with_projection_dtype(mut self, dtype: FloatDType) -> Self {
+        self.projection_dtype = Some(dtype);
+        self
+    }
+
+    pub(crate) fn project_linear<const D: usize>(
+        &self,
+        layer: &Linear,
+        input: Tensor<D>,
+    ) -> Tensor<D> {
+        let Some(dtype) = self.projection_dtype else {
+            return layer.forward(input);
+        };
+        linear(
+            input.cast(dtype),
+            layer.weight.val().cast(dtype),
+            layer.bias.as_ref().map(|bias| bias.val().cast(dtype)),
+        )
+        .cast(FloatDType::F32)
+    }
+
     /// `d_inner = expand · d_model`.
     pub fn d_inner(&self) -> usize {
         // Inferred from `out_proj`
@@ -615,6 +644,7 @@ impl Mamba3Config {
             mimo_o_hmp,
             out_norm,
             out_proj,
+            projection_dtype: None,
             init_state_hpr,
             state_rank,
             ngroups,

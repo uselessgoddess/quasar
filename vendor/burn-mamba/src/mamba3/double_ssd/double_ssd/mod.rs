@@ -94,7 +94,7 @@ impl Mamba3 {
         });
 
         // ── Step 1: In-projection ─────────────────────────────────────────────
-        let proj_bsd = self.in_proj.forward(input_bsm);
+        let proj_bsd = self.project_linear(&self.in_proj, input_bsm);
         let bc_size = ngroups * state_rank * mimo_rank;
 
         // [batch, sequence, *] split along channel dim.
@@ -387,7 +387,7 @@ impl Mamba3 {
         san(&y_bsi);
 
         // ── Out-projection ────────────────────────────────────────────────────
-        let out_bsm = self.out_proj.forward(y_bsi);
+        let out_bsm = self.project_linear(&self.out_proj, y_bsi);
         san(&out_bsm);
 
         // ── Update remaining cache fields ─────────────────────────────────────
@@ -460,7 +460,7 @@ mod step {
             san(&input_bd);
 
             // ── In-projection ─────────────────────────────────────────────────
-            let proj_bd = self.in_proj.forward(input_bd);
+            let proj_bd = self.project_linear(&self.in_proj, input_bd);
             san(&proj_bd);
             let bc_size = ngroups * state_rank * mimo_rank;
             // [batch, *] split along channel dim.
@@ -620,7 +620,7 @@ mod step {
             };
 
             // ── Out-projection ────────────────────────────────────────────────
-            let out_bm = self.out_proj.forward(y_bi);
+            let out_bm = self.project_linear(&self.out_proj, y_bi);
             san(&out_bm);
             out_bm
         }

@@ -44,6 +44,10 @@ struct Args {
     /// SwiGLU elementwise math and the residual stream remain fp32.
     #[arg(long, value_enum)]
     ffn_dtype: Option<ReducedDtype>,
+    /// Explicit compute dtype for Mamba input/output projection GEMMs. SSD
+    /// coefficients, recurrent state, discretization and norms remain fp32.
+    #[arg(long, value_enum)]
+    mamba_dtype: Option<ReducedDtype>,
     #[arg(long, value_enum, default_value_t = Ssd::Serial)]
     ssd: Ssd,
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
@@ -146,11 +150,12 @@ fn main() -> Result<()> {
     device.seed(1337);
 
     let ssd_mode = SsdMode::from(args.ssd);
-    let mut model = Quasar::new_with_ssd_and_dtypes(
+    let mut model = Quasar::new_with_ssd_and_projection_dtypes(
         &cfg,
         ssd_mode.clone(),
         args.head_dtype.map(FloatDType::from),
         args.ffn_dtype.map(FloatDType::from),
+        args.mamba_dtype.map(FloatDType::from),
         &device,
     );
     let run = Run::new()
@@ -163,15 +168,17 @@ fn main() -> Result<()> {
     let (input, target) = tokens(&cfg, args.micro_batch, &device);
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
     let mut loss_scaler = (matches!(args.head_dtype, Some(ReducedDtype::F16))
-        || matches!(args.ffn_dtype, Some(ReducedDtype::F16)))
+        || matches!(args.ffn_dtype, Some(ReducedDtype::F16))
+        || matches!(args.mamba_dtype, Some(ReducedDtype::F16)))
     .then(|| DynamicLossScaler::new(200));
 
     println!(
-        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} ffn_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} vary_tokens={} tokens/step={tokens_per_step}",
+        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} ffn_dtype={:?} mamba_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} vary_tokens={} tokens/step={tokens_per_step}",
         args.model,
         args.dtype,
         args.head_dtype,
         args.ffn_dtype,
+        args.mamba_dtype,
         args.micro_batch,
         args.accum,
         args.ssd,

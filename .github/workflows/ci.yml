@@ -120,7 +120,7 @@ jobs:
   # Precision work is gated on these numbers instead of a global dtype guess.
   gpu-benchmark:
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -158,10 +158,13 @@ jobs:
           2>&1 | tee ../../benchmark-logs/profile.log
       - name: P1 — dense GEMM roofline
         run: examples/roofline.sh
-      # P2b is now the production baseline. Spend the same paired quality
-      # budget on exactly one downstream projection family.
+      # Retain each accepted seam as an independent regression gate.
       - name: P4 — paired FP16 head vs head plus FFN
         run: examples/fp16_ffn_ab.sh
+      # P4 is the production reference. Spend the same paired quality budget on
+      # exactly one remaining large model-level projection family.
+      - name: P5 — paired FP16 head plus FFN vs Mamba projections
+        run: examples/fp16_mamba_projection_ab.sh
       - name: Preserve performance diagnostics
         if: always()
         uses: actions/upload-artifact@v4

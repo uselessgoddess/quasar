@@ -265,7 +265,37 @@ weights и масштабированный backward. `tiny-turbo` включа�
 seam по умолчанию; `--head-dtype fp32`, `--ffn-dtype fp32` и
 `--mamba-dtype fp32` отключают их независимо.
 
-### Итог P0–P5 и ETA
+### P6: ROCm rocWMMA backend — отклонён
+
+[Run 30345853678](https://github.com/uselessgoddess/quasar/actions/runs/30345853678)
+изолировал backend на крупнейшей projection-форме модели: bias-free
+`4096×640 @ 640×32768`, forward и оба GEMM backward, fp16 operands с fp32
+masters/outputs и loss scale 1024. Vulkan и ROCm rocWMMA получили одинаковые
+данные, один warm-up и median трёх samples; spread был ниже 3%, поэтому
+auto-extension до девяти не понадобился.
+
+| backend | median | min/max | throughput | peak VRAM | решение |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Vulkan | 20.006 ms | 19.930–20.425 ms | **25.76 TFLOP/s** | **2.277 GiB** | reference |
+| ROCm rocWMMA | 260.579 ms | 260.014–262.950 ms | **1.98 TFLOP/s** | **6.799 GiB** | reject |
+
+rocWMMA оказался на **92.31% медленнее** reference, хотя прошёл memory и
+численные gates: activation `[-0.181641, 0.290039]`, mean `1.917477e-6`,
+grad norm `2.449194e-2`, non-finite count `0`, максимальная forward ошибка
+`1.220703e-4`, ошибки gradients не выше `1.644075e-7`.
+
+Первый запуск не дошёл до matmul из-за `hipMemcpy2DAsync` с
+`hipErrorInvalidValue` на contiguous rank-2 upload. Повтор на commit
+[`2f089ca`](https://github.com/konard/uselessgoddess-quasar/commit/2f089ca02169748609cfab5b931b111aa858ccf8)
+передал те же contiguous bytes через rank-1 и zero-copy reshape, после чего
+измерил настоящий rocWMMA kernel. CubeCL позже исправил тот же staging defect
+в upstream commit
+[`174238e`](https://github.com/tracel-ai/cubecl/commit/174238e23f5d1334082db37291684f230130c37b),
+но transfer fix не меняет измеренный 13× разрыв kernel throughput. Поэтому
+rocWMMA feature удалён; следующий независимый backend gate использует
+hipBLASLt напрямую.
+
+### Итог P0–P6 и ETA
 
 Полный default `tiny-turbo` содержит 1.6384B токенов. Строка P1 — отдельный
 GEMM roofline, поэтому она не подменяет full-step throughput:
@@ -280,6 +310,7 @@ GEMM roofline, поэтому она не подменяет full-step throughpu
 | P2b f16 tied head | 12 134 | 5.87 TFLOP/s | 12.111 GiB | 37.5 ч | accepted |
 | P4 f16 head + FFN | 14 679 | 7.10 TFLOP/s | 12.038 GiB | 31.0 ч | accepted |
 | P5 f16 head + FFN + Mamba | **17 693** | **8.56 TFLOP/s** | **11.835 GiB** | **25.7 ч** | production |
+| P6 ROCm rocWMMA linear | — | 1.98 TFLOP/s isolated | 6.799 GiB | — | rejected |
 
 `examples/performance_baseline.sh` теперь не только сохраняет sampler log, но
 и валит CI, если production peak превышает 15 GiB. Он запускает принятые fp16
@@ -309,6 +340,8 @@ head + FFN + Mamba paths; `examples/fp16_head_ab.sh`,
 - recomputed CE доказал точное совпадение trajectory и освободил 3.907 GiB, но
   high-level chunk graph оказался на 10.15% медленнее, а попытка использовать
   запас для batch 8 — на 60.07% медленнее и выше VRAM gate.
+- rocWMMA корректно выполнил крупнейшую projection-форму, но дал только
+  1.98 TFLOP/s против 25.76 TFLOP/s Vulkan и был отклонён до full-step пробы.
 
 Принятые P2b/P4/P5 одновременно быстры, finite и находятся внутри loss gate,
 но P5 всё же остался ниже 20 effective TFLOP/s. Поэтому model-level precision

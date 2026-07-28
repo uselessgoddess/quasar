@@ -156,8 +156,10 @@ class Engine
 
     ~Engine()
     {
-        hipFree(workspace_);
-        hipStreamDestroy(stream_);
+        const hipError_t free_status = hipFree(workspace_);
+        const hipError_t stream_status = hipStreamDestroy(stream_);
+        static_cast<void>(free_status);
+        static_cast<void>(stream_status);
         hipblasLtDestroy(handle_);
     }
 

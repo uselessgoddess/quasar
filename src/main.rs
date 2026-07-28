@@ -156,6 +156,10 @@ struct Overrides {
     /// tiny-turbo fp16 default while keeping norms and residuals in fp32.
     #[arg(long, value_enum)]
     ffn_dtype: Option<HeadDtype>,
+    /// Compute dtype of the Mamba input/output projections. `fp32` disables
+    /// the measured tiny-turbo default while SSD state math remains fp32.
+    #[arg(long, value_enum)]
+    mamba_dtype: Option<HeadDtype>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -486,7 +490,8 @@ impl Preset {
                 .with_checkpointing(false)
                 .with_ssd_mode(Some(config::SsdMode::Serial))
                 .with_head_dtype(Some(config::HeadDtype::F16))
-                .with_ffn_dtype(Some(config::FfnDtype::F16)),
+                .with_ffn_dtype(Some(config::FfnDtype::F16))
+                .with_mamba_dtype(Some(config::MambaDtype::F16)),
             Self::FactorioNano => {
                 let cfg = config::factorio::nano();
                 let (micro, accum) = (32, 1);
@@ -581,6 +586,12 @@ impl Overrides {
                 HeadDtype::F16 => Some(config::FfnDtype::F16),
             };
         }
+        if let Some(dtype) = self.mamba_dtype {
+            run.mamba_dtype = match dtype {
+                HeadDtype::Fp32 => None,
+                HeadDtype::F16 => Some(config::MambaDtype::F16),
+            };
+        }
         run
     }
 }
@@ -598,6 +609,7 @@ mod tests {
         assert!(!turbo.checkpointing);
         assert_eq!(turbo.head_dtype, Some(config::HeadDtype::F16));
         assert_eq!(turbo.ffn_dtype, Some(config::FfnDtype::F16));
+        assert_eq!(turbo.mamba_dtype, Some(config::MambaDtype::F16));
 
         let nano = Preset::FactorioNano.run_defaults();
 
@@ -619,6 +631,7 @@ mod tests {
             assert_eq!(run.ssd_mode, None);
             assert_eq!(run.head_dtype, None);
             assert_eq!(run.ffn_dtype, None);
+            assert_eq!(run.mamba_dtype, None);
             assert_eq!((run.micro_batch, run.accum), (8, 16));
             assert!(run.checkpointing);
         }

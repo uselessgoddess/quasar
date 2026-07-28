@@ -100,8 +100,17 @@ loss-отклонение на 0.1243% при лимите 0.5%. F16 head при
 0.0060%, loss scale остался 1024, non-finite count — ноль. Поэтому f16 FFN
 принят вместе с head path.
 
-P4 остаётся ниже 20 effective TFLOP/s, поэтому небольшие elementwise fusion
-не продолжаются. Следующий отдельный model-level gate ограничен Mamba
-input/output projections, которые оставляют coefficients, discretization,
-recurrent state, norms и residual stream fp32. После него решение переходит к
+P5 выполнен в
+[run 30338965261](https://github.com/uselessgoddess/quasar/actions/runs/30338965261)
+на
+[commit `bb67875`](https://github.com/konard/uselessgoddess-quasar/commit/bb67875e2326d4076e417a86ab0f1491e414c264).
+F16 только в Mamba input/output projections поднял точный paired результат с
+14 593 до **17 693 tok/s**, или с 7.06 до **8.56 effective TFLOP/s**
+(+21.24%), и снизил peak с 12.038 до **11.835 GiB**. SSD coefficients,
+discretization, recurrent state, norms и residual stream оставались fp32.
+Максимальное trailing-3 loss-отклонение составило 0.0060%; loss scale во всех
+62 training points остался 1024, non-finite count — ноль.
+
+P5 всё ещё ниже 20 effective TFLOP/s, поэтому следующие model-level precision
+seams и небольшие elementwise fusion не продолжаются. Решение переходит к
 fused head/CE или backend spike, а не к глобальному autocast.

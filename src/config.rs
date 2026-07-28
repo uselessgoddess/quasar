@@ -65,6 +65,16 @@ pub enum FfnDtype {
     F16,
 }
 
+/// Reduced compute dtype for the Mamba input/output projections.
+///
+/// Parameters, optimizer state, SSD coefficients, recurrent state,
+/// discretization, norms and residuals remain fp32. The explicit option keeps
+/// old run files and unmeasured presets on their original execution path.
+#[derive(Config, Debug, PartialEq, Eq)]
+pub enum MambaDtype {
+    F16,
+}
+
 /// What mixes tokens in a layer.
 ///
 /// A pure-SSM stack recalls an arbitrary earlier token poorly — its memory is a

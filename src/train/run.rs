@@ -77,6 +77,10 @@ pub struct Run {
     /// weights, norms, SwiGLU elementwise math and residuals stay fp32.
     #[config(default = "None")]
     pub ffn_dtype: Option<config::FfnDtype>,
+    /// Reduced compute dtype for Mamba input/output projection GEMMs. Master
+    /// weights, SSD coefficient/state math, norms and residuals stay fp32.
+    #[config(default = "None")]
+    pub mamba_dtype: Option<config::MambaDtype>,
     #[config(default = 1337)]
     pub seed: u64,
     #[config(default = 20)]
@@ -152,11 +156,15 @@ pub fn run(
     let ffn_dtype = run.ffn_dtype.as_ref().map(|dtype| match dtype {
         config::FfnDtype::F16 => FloatDType::F16,
     });
-    let mut model = Quasar::new_with_ssd_and_dtypes(
+    let mamba_dtype = run.mamba_dtype.as_ref().map(|dtype| match dtype {
+        config::MambaDtype::F16 => FloatDType::F16,
+    });
+    let mut model = Quasar::new_with_ssd_and_projection_dtypes(
         cfg,
         run.ssd_mode.clone().unwrap_or_default(),
         head_dtype,
         ffn_dtype,
+        mamba_dtype,
         &device,
     );
     let mut optim = Optim::new(run, &model);
@@ -171,8 +179,9 @@ pub fn run(
         (optim, state) = (loaded, resumed);
         println!("resuming {} at step {}", dir.display(), state.step);
     }
-    let mut loss_scaler = (run.head_dtype.is_some() || run.ffn_dtype.is_some())
-        .then(|| state.loss_scaler.unwrap_or_else(|| DynamicLossScaler::new(200)));
+    let mut loss_scaler =
+        (run.head_dtype.is_some() || run.ffn_dtype.is_some() || run.mamba_dtype.is_some())
+            .then(|| state.loss_scaler.unwrap_or_else(|| DynamicLossScaler::new(200)));
     state.loss_scaler = loss_scaler;
 
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
@@ -186,14 +195,19 @@ pub fn run(
         per_step
     );
     if let Some(scaler) = loss_scaler {
-        let seams = match (run.head_dtype.is_some(), run.ffn_dtype.is_some()) {
-            (true, true) => "output head + FFN projections",
-            (true, false) => "output head",
-            (false, true) => "FFN projections",
-            (false, false) => unreachable!("a scaler requires an fp16 seam"),
-        };
+        let mut seams = Vec::new();
+        if run.head_dtype.is_some() {
+            seams.push("output head");
+        }
+        if run.ffn_dtype.is_some() {
+            seams.push("FFN projections");
+        }
+        if run.mamba_dtype.is_some() {
+            seams.push("Mamba projections");
+        }
         println!(
-            "training precision: fp16 {seams} | fp32 master/norm/residual/logits/loss | loss scale {:.0}",
+            "training precision: fp16 {} | fp32 master/norm/residual/SSD state/logits/loss | loss scale {:.0}",
+            seams.join(" + "),
             scaler.scale()
         );
     }
@@ -565,12 +579,14 @@ mod tests {
         json.as_object_mut().unwrap().remove("ssd_mode");
         json.as_object_mut().unwrap().remove("head_dtype");
         json.as_object_mut().unwrap().remove("ffn_dtype");
+        json.as_object_mut().unwrap().remove("mamba_dtype");
 
         let loaded: Run = serde_json::from_value(json).unwrap();
 
         assert_eq!(loaded.ssd_mode, None);
         assert_eq!(loaded.head_dtype, None);
         assert_eq!(loaded.ffn_dtype, None);
+        assert_eq!(loaded.mamba_dtype, None);
     }
 
     #[test]
@@ -607,7 +623,8 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let run = tiny_run()
             .with_head_dtype(Some(config::HeadDtype::F16))
-            .with_ffn_dtype(Some(config::FfnDtype::F16));
+            .with_ffn_dtype(Some(config::FfnDtype::F16))
+            .with_mamba_dtype(Some(config::MambaDtype::F16));
 
         super::run(&config::Model::toy(), &run, data.path(), out.path(), &Device::default())
             .unwrap();

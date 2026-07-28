@@ -271,17 +271,24 @@ recomputed cross-entropy затем снизил память с 14.360 до 10.
 (+20.85%). Максимальное trailing-3 loss-отклонение составило 0.0060% при
 лимите 0.5%, non-finite count — ноль.
 
-Поэтому `tiny-turbo` использует f16 для tied output head и FFN projections;
-master weights, optimizer state, norms, residual stream, logits, softmax и
-loss остаются fp32. Dynamic-scaler state входит в checkpoint, а
-`--head-dtype fp32` и `--ffn-dtype fp32` независимо отключают пути.
+P5 затем расширил seam только на Mamba input/output projections и дал
+**17 693 tok/s, 8.56 TFLOP/s и 11.835 GiB** против 14 593 tok/s,
+7.06 TFLOP/s и 12.038 GiB у точного paired head+FFN reference (+21.24%).
+Максимальное trailing-3 loss-отклонение снова составило 0.0060%, все 62
+training points сохранили scale 1024, non-finite count — ноль.
 
-Эти результаты не разрешают глобальный reduced dtype. Поскольку P4 остался
-ниже 20 TFLOP/s, мелкие elementwise fusion остановлены. Следующий отдельный
-gate ограничен Mamba input/output projections при fp32 SSD state,
-discretization и coefficients. Затем действует backend pivot: fused head/CE
-kernel с fp32 softmax/gradient accumulation и ограниченный spike
-HIP/hipBLASLt или Burn ROCm. Числа, A/B и причины решений находятся в
+Поэтому `tiny-turbo` использует f16 для tied output head, FFN и Mamba
+input/output projections; master weights, optimizer state, SSD coefficients,
+discretization, recurrent state, norms, residual stream, logits, softmax и
+loss остаются fp32. Dynamic-scaler state входит в checkpoint, а
+`--head-dtype fp32`, `--ffn-dtype fp32` и `--mamba-dtype fp32` независимо
+отключают пути.
+
+Эти результаты не разрешают глобальный reduced dtype. P5 всё ещё ниже
+20 TFLOP/s, поэтому model-level precision и мелкие elementwise fusion
+остановлены. Теперь действует backend pivot: fused head/CE kernel с fp32
+softmax/gradient accumulation и ограниченный spike HIP/hipBLASLt или Burn
+ROCm. Числа, A/B и причины решений находятся в
 [`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
 [`ROOFLINE.md`](ROOFLINE.md).
 

@@ -26,8 +26,9 @@ Burn TUI считал optimizer steps. При `micro_batch=1`, `accum=96` и
    один раз за окно.
 3. Burn/burn-mamba в закреплённых ревизиях не имеют готового AMP. Глобальный
    bf16/f16 остаётся небезопасной заменой autocast + GradScaler; измеренный
-   production path использует fp16 только для output-head и трёх FFN GEMM, с
-   fp32 master/norm/residual/logits/loss и собственным dynamic loss scaler.
+   production path использует fp16 только для output-head, трёх FFN GEMM и
+   Mamba input/output projections, с fp32 master/norm/residual/SSD
+   coefficients/state/logits/loss и собственным dynamic loss scaler.
 4. Внешний Burn checkpointing повторял целый block, а внутренний
    burn-mamba `SerialRecalculated` повторял SSD ещё раз.
 5. CubeCL удерживал до 128 Fusion streams и вместе с ними live buffers. Один
@@ -230,7 +231,41 @@ inner-weight gradient с допуском `1e-2`, проверяет fp32 master
 масштабированный backward. `tiny-turbo` включает оба измеренных seam по
 умолчанию; `--head-dtype fp32` и `--ffn-dtype fp32` отключают их независимо.
 
-### Итог P0–P4 и ETA
+### P5: fp16 Mamba input/output projections — принят
+
+[Run 30338965261](https://github.com/uselessgoddess/quasar/actions/runs/30338965261)
+проверил последнюю разрешённую model-level projection family на commit
+[`bb67875`](https://github.com/konard/uselessgoddess-quasar/commit/bb67875e2326d4076e417a86ab0f1491e414c264).
+Reference использовал принятые fp16 head+FFN, а candidate дополнительно
+переводил в fp16 только Mamba `in_proj` и `out_proj`. SSD coefficients,
+discretization, recurrent state, norms, gating, residual stream, master
+weights, optimizer state, logits и loss оставались fp32.
+
+Оба performance arm автоматически расширились с трёх до девяти samples из-за
+spread выше 3%:
+
+| вариант | samples | median | min/max | tok/s | effective | peak VRAM | решение |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| fp16 head + FFN | 9 | 8.982 s | 8.973–11.061 s | 14 593 | 7.06 TFLOP/s | 12.038 GiB | reference |
+| fp16 head + FFN + Mamba | 9 | 7.408 s | 7.406–9.511 s | **17 693** | **8.56 TFLOP/s** | **11.835 GiB** | **production** |
+
+Дополнительный выигрыш составил **21.24%**, а performance peak уменьшился ещё
+на 0.203 GiB. На отдельных 21-point varied-token trajectories максимальное
+trailing-3 loss-отклонение снова составило **0.0060%** при лимите 0.5%; обе
+стороны завершили на loss 0.0732. Все 62 training points четырёх arms
+сохранили loss scale 1024. Диагностика reference/candidate: activation
+`[-4.832693, 5.017528], mean 3.249888e-3` против
+`[-4.831584, 5.017357], mean 3.248936e-3`, grad norm `1.228284` против
+`1.228251`, loss `10.535172` против `10.535189`, non-finite count `0`.
+Quality peak candidate 11.835 GiB также прошёл 15-GiB gate.
+
+Численный unit test сравнивает full forward, recurrent step, input gradient и
+обе projection-weight gradients с fp32 reference, проверяет fp32 output/master
+weights и масштабированный backward. `tiny-turbo` включает все три измеренных
+seam по умолчанию; `--head-dtype fp32`, `--ffn-dtype fp32` и
+`--mamba-dtype fp32` отключают их независимо.
+
+### Итог P0–P5 и ETA
 
 Полный default `tiny-turbo` содержит 1.6384B токенов. Строка P1 — отдельный
 GEMM roofline, поэтому она не подменяет full-step throughput:
@@ -243,19 +278,21 @@ GEMM roofline, поэтому она не подменяет full-step throughpu
 | P3 chunked CE, 4×32 | 9 524 | 4.61 TFLOP/s | 10.453 GiB | 47.8 ч | throughput fail |
 | P3 chunked CE, 8×16 | 4 233 | 2.05 TFLOP/s | 15.852 GiB | 107.5 ч | VRAM + throughput fail |
 | P2b f16 tied head | 12 134 | 5.87 TFLOP/s | 12.111 GiB | 37.5 ч | accepted |
-| P4 f16 head + FFN | **14 679** | **7.10 TFLOP/s** | **12.038 GiB** | **31.0 ч** | production |
+| P4 f16 head + FFN | 14 679 | 7.10 TFLOP/s | 12.038 GiB | 31.0 ч | accepted |
+| P5 f16 head + FFN + Mamba | **17 693** | **8.56 TFLOP/s** | **11.835 GiB** | **25.7 ч** | production |
 
 `examples/performance_baseline.sh` теперь не только сохраняет sampler log, но
 и валит CI, если production peak превышает 15 GiB. Он запускает принятые fp16
-head + FFN paths; `examples/fp16_head_ab.sh` и `examples/fp16_ffn_ab.sh`
-сохраняют каждый независимый paired control.
+head + FFN + Mamba paths; `examples/fp16_head_ab.sh`,
+`examples/fp16_ffn_ab.sh` и `examples/fp16_mamba_projection_ab.sh` сохраняют
+каждый независимый paired control.
 
 ### Stop/pivot analysis
 
-Цель 40 TFLOP/s всё ещё требует 5.6× к принятому P4. Текущий stack пока не
+Цель 40 TFLOP/s всё ещё требует 4.7× к принятому P5. Текущий stack пока не
 показывает такого запаса:
 
-- full step после двух принятых precision seams использует 7.10 TFLOP/s,
+- full step после трёх принятых precision seams использует 8.56 TFLOP/s,
   тогда как изолированный fp32 GEMM даёт 14.05 TFLOP/s, а f16 GEMM —
   42–43 TFLOP/s: значительная часть шага всё ещё не превращается в крупные
   matrix kernels;
@@ -265,26 +302,19 @@ head + FFN paths; `examples/fp16_head_ab.sh` и `examples/fp16_ffn_ab.sh`
 - Vulkan bf16 GEMM достигает 43–44 TFLOP/s, лишь 44–45% номинального matrix
   peak. Даже идеальное превращение всей модели в этот roofline почти не
   оставляет бюджета на softmax, norms, SSD и optimizer;
-- локальные head и FFN probes доказали, что WMMA ускоряет реальную
+- локальные head, FFN и Mamba probes доказали, что WMMA ускоряет реальную
   forward/backward нагрузку. Bf16 head без scaling нарушил trajectory, но f16
-  с dynamic scaling прошёл head и три FFN GEMM: dtype и safeguard нельзя
-  объединять в один вывод;
+  с dynamic scaling прошёл head и обе projection families: dtype и safeguard
+  нельзя объединять в один вывод;
 - recomputed CE доказал точное совпадение trajectory и освободил 3.907 GiB, но
   high-level chunk graph оказался на 10.15% медленнее, а попытка использовать
   запас для batch 8 — на 60.07% медленнее и выше VRAM gate.
 
-Предыдущий stop/pivot был основан на двух отклонённых seams. Принятые P2b и P4
-меняют одну из его предпосылок: два precision paths теперь одновременно
-быстры, finite и в loss gate. P4 всё же остался ниже 20 effective TFLOP/s,
-поэтому мелкие elementwise fusion прекращаются. Последний разрешённый
-model-level gate — следующая действительно крупная projection family: Mamba
-input/output projections в 10 из 12 блоков, при неизменных fp32 SSD
-coefficients, recurrent state, discretization, norms и residual stream. Он
-получает отдельный commit и те же numerical, paired full-step, trajectory и
-VRAM gates; глобального autocast по-прежнему нет.
-
-После этого приоритет переходит к fused head/CE kernel с fp32 softmax и
-gradient accumulation, затем к timeboxed HIP/hipBLASLt или Burn ROCm spike.
+Принятые P2b/P4/P5 одновременно быстры, finite и находятся внутри loss gate,
+но P5 всё же остался ниже 20 effective TFLOP/s. Поэтому model-level precision
+и мелкие elementwise fusion прекращаются; глобального autocast по-прежнему
+нет. Приоритет переходит к fused head/CE kernel с fp32 softmax и gradient
+accumulation, затем к timeboxed HIP/hipBLASLt или Burn ROCm spike.
 Изменение vocab относится к отдельному quality/GPU-hour эксперименту и не
 может объявляться победой по raw tok/s.
 
@@ -292,10 +322,11 @@ gradient accumulation, затем к timeboxed HIP/hipBLASLt или Burn ROCm sp
 
 На Vulkan глобальный bf16 был отвергнут backend'ом, а глобальный f16 попал в
 panic Burn fusion и получил non-finite loss. На ROCm оба reduced dtype ранее
-падали при выборе RDNA4 WMMA. Эти global-dtype пробы не противоречат P2b/P4:
-production device, master weights и остальная модель остаются fp32, а только
-измеренные head и FFN GEMM явно cast'ятся в f16 и защищены scaler. Решение
-основано на paired измерениях, а не на предположении об AMP.
+падали при выборе RDNA4 WMMA. Эти global-dtype пробы не противоречат
+P2b/P4/P5: production device, master weights и остальная модель остаются fp32,
+а только измеренные head, FFN и Mamba projection GEMM явно cast'ятся в f16 и
+защищены scaler. Решение основано на paired измерениях, а не на предположении
+об AMP.
 
 CubeCL profiler насчитал 9 948 kernel launches даже для одного micro-batch.
 Matmul занимает около 79% записанного GPU time, а elementwise/reduce/slice/copy
@@ -308,12 +339,13 @@ Matmul занимает около 79% записанного GPU time, а eleme
 
 Для формы из issue (`4 × 12 × 1024 = 49152` токена/step) 12 500 шагов — 614.4M
 токенов. Скриншотные 5 966 tok/s означают 28.6 часа; P4 при 14 679 tok/s —
-**11.6 часа**. Цель 9 часов требует 18 963 tok/s, 8 часов — 21 333 tok/s.
-Текущий результат сокращает исходный запуск примерно на 17 часов, но до
-заявленного overnight target всё ещё нужен выигрыш 1.29–1.45×.
+11.6 часа, а P5 при 17 693 tok/s — **9.6 часа**. Цель 9 часов требует
+18 963 tok/s, 8 часов — 21 333 tok/s. Текущий результат сокращает исходный
+запуск примерно на 19 часов, но до заявленного overnight target всё ещё нужен
+выигрыш 1.07–1.21×.
 
 Production default обрабатывает 1.6384B токенов за те же 12 500 шагов, поэтому
-при 14 679 tok/s занимает около **31.0 часа**. Для короткого issue-budget можно
+при 17 693 tok/s занимает около **25.7 часа**. Для короткого issue-budget можно
 явно задать `--accum 12`; startup сразу покажет, что полный token budget
 изменился.
 

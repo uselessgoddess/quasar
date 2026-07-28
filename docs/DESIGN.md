@@ -259,18 +259,26 @@ backend не выполняет. `base` тем более будет недоо�
 P0/P1 issue #21 измерили production на 5.11 effective TFLOP/s и bf16 GEMM
 roofline на 43–44 TFLOP/s. Точечный bf16 tied head дал 5.84 TFLOP/s и
 13.359 GiB, но нарушил loss gate (7.37% против допустимых 0.5%), поэтому
-production precision path остаётся **fp32**.
+production precision path остаётся **fp32**. Точный recomputed cross-entropy
+блоками по 256 позиций затем снизил память с 14.360 до 10.453 GiB, но
+замедлил full step с 5.13 до 4.61 TFLOP/s. Batch 8×16 дал 2.05 TFLOP/s и
+15.852 GiB. P3 поэтому тоже откатан.
 
 Это не запрет bf16 как hardware dtype: isolated Vulkan matrix path работает.
-Запрещён именно следующий необоснованный high-level cast. Выбранный backend
-path — custom mixed-precision Linear backward с fp32 accumulation и затем
-fused cross-entropy; go/no-go сначала проверяется на `640×32768` head.
-Если Vulkan не достигает 60% matrix peak или остаётся нестабилен, следующий
-шаг — ограниченный spike HIP/hipBLASLt или Burn ROCm. До full-step результата
-выше 20 TFLOP/s мелкие fusion не приоритетны: профиль показывает одновременно
-matmul bottleneck и большой launch/orchestration gap. Числа, A/B и причины
-отката находятся в [`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix —
-в [`ROOFLINE.md`](ROOFLINE.md).
+Запрещены именно следующие необоснованные high-level cast и chunk graph.
+После двух кандидатов ниже 20 TFLOP/s срабатывает stop/pivot: P4 не расширяет
+precision seam, уже нарушивший trajectory, а P5–P7 не продолжаются как набор
+малых изменений.
+
+Выбранный backend path — fused `640×32768` head kernel: bf16 projection,
+fp32 softmax/loss, fp32 gradient accumulation и fp32 master weight, без
+materialized logits и без сотен 256-row matmul dispatch. Сначала он проходит
+isolated roofline/numerical gate, затем paired full-step gate. Если Vulkan
+остаётся нестабилен или full step не превышает 20 TFLOP/s, следующий шаг —
+ограниченный spike HIP/hipBLASLt или Burn ROCm, а не дальнейшие elementwise
+fusion. Числа, A/B и причины откатов находятся в
+[`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
+[`ROOFLINE.md`](ROOFLINE.md).
 
 ## 5. Данные
 

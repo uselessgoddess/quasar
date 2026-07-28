@@ -116,7 +116,40 @@ scale 1 и ноль NaN/Inf. Но trailing-3 smoothed loss вышел за об�
 10.852–12.470 s/step полный paired run занял бы около 13 часов и не мог
 изменить уже полученный отрицательный результат. Production остаётся fp32.
 
-### Итог P0–P2 и ETA
+### P3: recomputed chunked cross-entropy — отклонён
+
+[Run 30314563487](https://github.com/uselessgoddess/quasar/actions/runs/30314563487)
+проверил следующий крупный рычаг на commit
+[`82322a4`](https://github.com/konard/uselessgoddess-quasar/commit/82322a4f90a792bef6cb54a839d0413c20f3676d).
+Custom backward не сохранял полный tensor logits: head пересчитывался блоками
+по 256 позиций, softmax и все суммы оставались fp32. Отдельные unit tests
+сравнили loss и оба gradient с materialized reference (`1e-5`), finite
+difference (`2e-3`) и проверили отсутствие non-finite.
+
+Три arm получили одинаковые seed, данные и 131 072 токена/step. После одного
+warm-up измерялись девять steps, потому что autotune снова расширил окно:
+
+| вариант | median | min/max | tok/s | effective | peak VRAM | решение |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| materialized, 4×32 | 12.365 s | 12.331–14.337 s | **10 600** | **5.13 TFLOP/s** | 14.360 GiB | reference |
+| chunked-256, 4×32 | 13.763 s | 13.741–15.693 s | 9 524 | 4.61 TFLOP/s | **10.453 GiB** | revert |
+| chunked-256, 8×16 | 30.966 s | 28.442–32.451 s | 4 233 | 2.05 TFLOP/s | **15.852 GiB** | reject |
+
+Все десять напечатанных loss совпали между arms; максимальное отклонение
+trailing-3 smoothed loss равно 0.0000%. Вариант 4×32 освободил 3.907 GiB, но
+замедлил step на 10.15%. Попытка превратить этот запас в batch 8 замедлила
+step на 60.07% и превысила обязательные 15 GiB на 0.852 GiB.
+
+Причина — не численная: high-level graph режет `640×32768` head на множество
+малых projection/recompute dispatch вместо одного хорошо загруженного GEMM.
+Увеличение micro-batch дополнительно удваивает live activations остальных
+слоёв. Поэтому [commit
+`6a205ee`](https://github.com/konard/uselessgoddess-quasar/commit/6a205ee9b1c88ef57c6fabdf200e187665a30cbf)
+откатил реализацию. Сохранение памяти само по себе не является throughput
+победой; следующий head-кандидат должен сливать projection, softmax и backward
+в одном или нескольких крупных native kernel.
+
+### Итог P0–P3 и ETA
 
 Полный default `tiny-turbo` содержит 1.6384B токенов. Строка P1 — отдельный
 GEMM roofline, поэтому она не подменяет full-step throughput:
@@ -126,7 +159,9 @@ GEMM roofline, поэтому она не подменяет full-step throughpu
 | P0 frozen fp32 | 10 558 | 5.11 TFLOP/s | 14.516 GiB | 43.1 ч | production |
 | P1 bf16 8192³ GEMM | — | 43.75 TFLOP/s roofline | — | — | stable diagnostic |
 | P2 bf16 tied head | 12 078 | 5.84 TFLOP/s | 13.359 GiB | 37.7 ч | quality fail |
-| production после P2 | **10 558** | **5.11 TFLOP/s** | **14.516 GiB** | **43.1 ч** | fp32 |
+| P3 chunked CE, 4×32 | 9 524 | 4.61 TFLOP/s | 10.453 GiB | 47.8 ч | throughput fail |
+| P3 chunked CE, 8×16 | 4 233 | 2.05 TFLOP/s | 15.852 GiB | 107.5 ч | VRAM + throughput fail |
+| production после P3 | **10 558** | **5.11 TFLOP/s** | **14.516 GiB** | **43.1 ч** | fp32 |
 
 `examples/performance_baseline.sh` теперь не только сохраняет sampler log, но
 и валит CI, если production peak превышает 15 GiB.
@@ -148,19 +183,29 @@ GEMM roofline, поэтому она не подменяет full-step throughpu
 - локальный head probe доказал, что WMMA ускоряет реальную forward/backward
   нагрузку, но обычный autodiff через bf16 cast не сохраняет требуемую
   optimization trajectory. Расширять тот же seam на FFN/QKV/Mamba projections
-  после такого сигнала небезопасно.
+  после такого сигнала небезопасно;
+- recomputed CE доказал точное совпадение trajectory и освободил 3.907 GiB, но
+  high-level chunk graph оказался на 10.15% медленнее, а попытка использовать
+  запас для batch 8 — на 60.07% медленнее и выше VRAM gate.
 
-Поэтому следующий крупный рычаг — не ещё один high-level cast. Go/no-go spike
-должен сначала дать для одного `640×32768` Linear точный bf16 forward/backward
-с fp32 gradient accumulation и fp32 master weight, стабильность без
-non-finite и не менее 60% matrix peak. Приоритетный путь:
+P2 и P3 не достигли даже 20 effective TFLOP/s и оба откатились. P4 (более
+широкий mixed precision) не запускается после провала минимального P2 seam:
+он увеличивает уже измеренное расхождение trajectory. P5–P7 также не могут
+честно закрыть почти 7.8× локальными fusion или изменением model contract.
+Здесь срабатывает обязательный stop/pivot.
 
-1. custom CubeCL mixed-precision Linear/VJP с fp32 accumulation;
-2. chunked fused cross-entropy с fp32 softmax и recompute head, чтобы не
-   удерживать полный logits tensor;
-3. paired full-step gate; продолжать fusion только если он превысит
+Следующий допустимый go/no-go — не ещё один high-level cast или chunk graph.
+Он должен дать для одного `640×32768` head fused bf16 forward/backward с fp32
+master weight, fp32 softmax/gradient accumulation, стабильность без non-finite
+и крупные dispatch. Приоритетный путь:
+
+1. custom CubeCL kernel, объединяющий projection, fp32 cross-entropy и VJP без
+   materialized logits и без 256-row matmul graph;
+2. isolated kernel gate против measured bf16 roofline, затем те же numerical,
+   VRAM и paired full-step проверки;
+3. продолжать backend work только если full step превысит
    20 effective TFLOP/s;
-4. если Vulkan не проходит Linear go/no-go, timeboxed HIP/hipBLASLt или Burn
+4. если Vulkan не проходит fused-head go/no-go, timeboxed HIP/hipBLASLt или Burn
    ROCm backend spike. Не продолжать мелкие elementwise fusion до этого
    решения.
 

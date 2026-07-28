@@ -66,3 +66,20 @@ trailing-3 loss разошёлся на 7.37% при лимите 0.5%. Seam о�
 bf16 roofline доказывает доступность matrix path, но не доказывает безопасный
 обычный autodiff через reduced-precision casts. Следующий go/no-go требует
 custom backward с fp32 gradient accumulation.
+
+Следующий downstream gate тоже выполнен в
+[run 30314563487](https://github.com/uselessgoddess/quasar/actions/runs/30314563487).
+Точный recomputed cross-entropy блоками по 256 позиций совпал с materialized
+fp32 reference по loss и gradients, уменьшил peak VRAM с 14.360 до 10.453
+GiB, но замедлил полный step с 5.13 до 4.61 TFLOP/s (−10.15%). Batch 8×16
+дал только 2.05 TFLOP/s и 15.852 GiB, поэтому одновременно нарушил throughput
+и memory gates.
+
+Этот результат уточняет roofline-разрыв: убрать materialized logits
+недостаточно. High-level chunks превращают большой head GEMM в множество
+малых projection/recompute dispatch, тогда как roofline измеряет крупную,
+непрерывно загруженную матрицу. P3 откатан. Следующий go/no-go должен быть
+настоящим fused head kernel (projection + fp32 softmax/loss + VJP), а не
+chunking существующего autodiff graph; после двух кандидатов ниже 20
+effective TFLOP/s дальнейшие локальные fusion остановлены до такого backend
+spike.

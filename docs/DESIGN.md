@@ -265,19 +265,24 @@ recomputed cross-entropy затем снизил память с 14.360 до 10.
 
 Повтор того же минимального seam в f16 с dynamic loss scaling прошёл:
 **12 134 tok/s, 5.87 TFLOP/s и 12.111 GiB** против 10 548 tok/s, 5.10 TFLOP/s
-и 14.111 GiB у paired fp32. Максимальное отклонение trailing-3 loss за
-21 точку — 0.1243% при лимите 0.5%, non-finite count — ноль. Поэтому
-`tiny-turbo` использует f16 только для tied output-head GEMM; master weights,
-optimizer state, остальная модель, logits, softmax и loss остаются fp32.
-Dynamic-scaler state входит в checkpoint, а `--head-dtype fp32` отключает путь.
+и 14.111 GiB у paired fp32. Следующий P4 gate добавил три FFN projection GEMM
+во всех 12 блоках и дал **14 679 tok/s, 7.10 TFLOP/s и 12.038 GiB** против
+12 146 tok/s, 5.87 TFLOP/s и 12.112 GiB у paired f16-head reference
+(+20.85%). Максимальное trailing-3 loss-отклонение составило 0.0060% при
+лимите 0.5%, non-finite count — ноль.
 
-Этот результат не разрешает глобальный reduced dtype. P4 расширяет precision
-по одному большому projection family и повторяет numerical, trajectory,
-throughput и VRAM gates. Если после такого контролируемого P4 full step
-остаётся ниже 20 TFLOP/s, действует stop/pivot: fused head/CE kernel с fp32
-softmax/gradient accumulation, затем ограниченный spike HIP/hipBLASLt или Burn
-ROCm, а не набор мелких elementwise fusion. Числа, A/B и причины решений
-находятся в [`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
+Поэтому `tiny-turbo` использует f16 для tied output head и FFN projections;
+master weights, optimizer state, norms, residual stream, logits, softmax и
+loss остаются fp32. Dynamic-scaler state входит в checkpoint, а
+`--head-dtype fp32` и `--ffn-dtype fp32` независимо отключают пути.
+
+Эти результаты не разрешают глобальный reduced dtype. Поскольку P4 остался
+ниже 20 TFLOP/s, мелкие elementwise fusion остановлены. Следующий отдельный
+gate ограничен Mamba input/output projections при fp32 SSD state,
+discretization и coefficients. Затем действует backend pivot: fused head/CE
+kernel с fp32 softmax/gradient accumulation и ограниченный spike
+HIP/hipBLASLt или Burn ROCm. Числа, A/B и причины решений находятся в
+[`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
 [`ROOFLINE.md`](ROOFLINE.md).
 
 ## 5. Данные

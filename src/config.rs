@@ -55,6 +55,16 @@ pub enum HeadDtype {
     F16,
 }
 
+/// Reduced compute dtype for the three feed-forward projections.
+///
+/// Parameters, optimizer state, norms, SwiGLU elementwise operations and the
+/// residual stream remain fp32. The explicit option keeps old run files and
+/// presets on their original execution path.
+#[derive(Config, Debug, PartialEq, Eq)]
+pub enum FfnDtype {
+    F16,
+}
+
 /// What mixes tokens in a layer.
 ///
 /// A pure-SSM stack recalls an arbitrary earlier token poorly — its memory is a

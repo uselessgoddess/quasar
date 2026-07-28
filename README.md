@@ -47,8 +47,8 @@ cargo run --release -- generate runs/tiny --prompt "The reason"
 at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
 `--save-every`, `--eval-every`, `--muon`, `--checkpointing`, `--ssd`.
-`tiny-turbo` also defaults to `--head-dtype f16`; pass `--head-dtype fp32` to
-disable that isolated precision path.
+`tiny-turbo` also defaults to `--head-dtype f16 --ffn-dtype f16`; pass either
+option as `fp32` to disable that independently measured precision path.
 
 The default tiny recipe is 12,500 optimizer steps, or 3.2768B tokens with the
 default `8 × 16 × 2048` effective batch. Changing either batch knob also changes
@@ -76,8 +76,11 @@ retains burn-mamba's chunk intermediates. Together with one CubeCL stream and a
 9070 XT; the fp32 full production batch reached 10.55k tok/s. Casting only its
 tied output-head GEMM to f16, with fp32 master/logits/loss and dynamic loss
 scaling, raised the same batch to **12.13k tok/s** at 12.111 GiB peak VRAM while
-the paired smoothed loss stayed within 0.1243%. The vendored burn-mamba branch
-uses a measured fused CubeCL rank-one scan by default and
+the paired smoothed loss stayed within 0.1243%. Extending that measured path to
+the three FFN projections raised it again to **14.68k tok/s** at 12.038 GiB;
+the paired smoothed loss stayed within 0.0060%. Norms, elementwise operations,
+residuals and master weights remain fp32. The vendored burn-mamba branch uses a
+measured fused CubeCL rank-one scan by default and
 retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch.
 Select `--checkpointing true --ssd recalculated` if a larger override runs out
 of memory. Other presets retain the memory-saving defaults. See

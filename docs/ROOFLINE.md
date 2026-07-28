@@ -92,7 +92,16 @@ performance peak VRAM с 14.111 до 12.111 GiB и удержал максима
 loss-отклонение на 0.1243% при лимите 0.5%. F16 head принят в `tiny-turbo`;
 глобальный dtype по-прежнему не используется.
 
-Следующий downstream gate расширяет f16 ровно на одно крупное projection
-family. Если этот контролируемый P4 не приближает full step к обязательным
-20 effective TFLOP/s, решение возвращается к fused head/CE или backend spike,
-а не к дальнейшему бесконтрольному autocast.
+Этот P4 downstream gate выполнен в
+[run 30334108965](https://github.com/uselessgoddess/quasar/actions/runs/30334108965).
+Три FFN projection GEMM в каждом блоке подняли результат с 12 146 до
+14 679 tok/s, или с 5.87 до 7.10 effective TFLOP/s (+20.85%), при peak
+12.038 GiB. Максимальное trailing-3 loss-отклонение за 21 точку составило
+0.0060%, loss scale остался 1024, non-finite count — ноль. Поэтому f16 FFN
+принят вместе с head path.
+
+P4 остаётся ниже 20 effective TFLOP/s, поэтому небольшие elementwise fusion
+не продолжаются. Следующий отдельный model-level gate ограничен Mamba
+input/output projections, которые оставляют coefficients, discretization,
+recurrent state, norms и residual stream fp32. После него решение переходит к
+fused head/CE или backend spike, а не к глобальному autocast.

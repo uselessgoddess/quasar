@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::Quasar;
 use crate::train::Run;
 
-/// Dynamic loss scale for the isolated fp16 output-head path.
+/// Dynamic loss scale for the measured fp16 projection paths.
 ///
 /// A non-finite step is discarded before either optimizer sees it. The scale
 /// then halves and the caller retries the same deterministic batch. A long

@@ -138,6 +138,12 @@ jobs:
               --showuse --showtemp --showpower
             vulkaninfo --summary || true
           } 2>&1 | tee benchmark-logs/environment.log
+      # Keep the established K4/K1/fused-scan regression gate as well as the
+      # new precision work. The P0 freeze answers a different question: whether
+      # the complete production recipe remains within its throughput/VRAM
+      # envelope.
+      - name: Regression — stepwise state-passing kernel A/B
+        run: examples/state_passing_ab.sh
       - name: P0 — production optimizer-step baseline
         run: examples/performance_baseline.sh
       - name: P0 — synchronized CubeCL kernel profile

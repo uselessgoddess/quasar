@@ -295,7 +295,61 @@ grad norm `2.449194e-2`, non-finite count `0`, максимальная forward 
 rocWMMA feature удалён; следующий независимый backend gate использует
 hipBLASLt напрямую.
 
-### Итог P0–P6 и ETA
+### P7: direct hipBLASLt linear — прошёл изолированный gate
+
+[Run 30352703527](https://github.com/uselessgoddess/quasar/actions/runs/30352703527)
+измерил hipBLASLt без CubeCL ROCm compiler на той же крупнейшей
+projection-форме `4096×640 @ 640×32768`, включая forward и оба GEMM backward.
+Reference и candidate использовали fp16 operands, fp32 outputs/gradient
+accumulation, loss scale 1024 и один warm-up. Spread первых трёх samples
+превысил 3% в обеих сторонах, поэтому harness автоматически расширил каждое
+окно до девяти.
+
+| backend | median | min/max | throughput | peak VRAM | решение |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Vulkan | 19.124 ms | 18.808–19.497 ms | 26.95 TFLOP/s | 2.285 GiB | reference |
+| direct hipBLASLt | 5.309 ms | 4.943–5.614 ms | **97.07 TFLOP/s** | **1.765 GiB** | production integration probe |
+
+Vendor library оказался на **260.19% быстрее** reference и прошёл 15-GiB
+gate. Для hipBLASLt activation был `[-0.198242, 0.198364]`, mean
+`1.716217e-9`, grad norm `9.727625e-2`, non-finite count `0`; максимальные
+ошибки output, input gradient и weight gradient относительно reference равны
+`0`. Исправленный source commit
+[`d7d4bd4`](https://github.com/konard/uselessgoddess-quasar/commit/d7d4bd4c538bd11c2c963b9d81980d714e5ea16a)
+оставляет этот exact-shape probe постоянным CI gate.
+
+Это локальный roofline, а не full-step claim: он доказал, что vendor GEMM
+достаточно быстр для следующей пробы, но не учитывал остальную модель,
+синхронизацию между runtimes и optimizer trajectory.
+
+### P8: production hipBLASLt tied head — отклонён
+
+[Run 30360553662](https://github.com/uselessgoddess/quasar/actions/runs/30360553662)
+проверил production tied-head integration на commit
+[`d0695f3`](https://github.com/konard/uselessgoddess-quasar/commit/d0695f37cdb6a122660c6592aa26f904336d3821).
+Native forward и оба gradients сначала совпали с обычным ROCm matmul в
+отдельном regression test. Но RDNA4 path требовал незавершённые
+[Burn PR #5188](https://github.com/tracel-ai/burn/pull/5188) и
+[CubeCL PR #1437](https://github.com/tracel-ai/cubecl/pull/1437): без них
+throughput calibration переполнял 32-bit launch scalar до первого native
+вызова.
+
+Обязательный full optimizer-step A/B остановился ещё на Vulkan control с этим
+dependency pair, до запуска hipBLASLt candidate. Начальная диагностика была
+finite: activation `[-6.394674, 20.93708]`, mean `3.229315e-3`, grad norm
+`1.226088`, loss `10.535510`, loss scale 1024 и non-finite count `0`. После
+warm-up control измерил один step за 8.438 s (**15 534 tok/s**), а следующий
+step получил non-finite gradients и был немедленно остановлен dynamic scaler.
+Peak VRAM **12.153 GiB** прошёл memory gate, но numerical gate — нет.
+
+Поскольку reference сам нарушил обязательное условие finite trajectory,
+валидного paired throughput или quality результата для production hipBLASLt
+не существует. Native integration, незавершённые dependency revisions и
+связанный рост MSRV удалены одним rejection commit; принятый P5 Vulkan path
+восстановлен без изменений. Изолированный P7 harness остаётся как
+воспроизводимое свидетельство и gate для будущей стабильной интеграции.
+
+### Итог P0–P8 и ETA
 
 Полный default `tiny-turbo` содержит 1.6384B токенов. Строка P1 — отдельный
 GEMM roofline, поэтому она не подменяет full-step throughput:
@@ -311,6 +365,8 @@ GEMM roofline, поэтому она не подменяет full-step throughpu
 | P4 f16 head + FFN | 14 679 | 7.10 TFLOP/s | 12.038 GiB | 31.0 ч | accepted |
 | P5 f16 head + FFN + Mamba | **17 693** | **8.56 TFLOP/s** | **11.835 GiB** | **25.7 ч** | production |
 | P6 ROCm rocWMMA linear | — | 1.98 TFLOP/s isolated | 6.799 GiB | — | rejected |
+| P7 direct hipBLASLt linear | — | 97.07 TFLOP/s isolated | 1.765 GiB | — | integration probe passed |
+| P8 production hipBLASLt tied head | — | no valid paired result | 12.153 GiB control | — | non-finite control; rejected |
 
 `examples/performance_baseline.sh` теперь не только сохраняет sampler log, но
 и валит CI, если production peak превышает 15 GiB. Он запускает принятые fp16
@@ -342,12 +398,18 @@ head + FFN + Mamba paths; `examples/fp16_head_ab.sh`,
   запас для batch 8 — на 60.07% медленнее и выше VRAM gate.
 - rocWMMA корректно выполнил крупнейшую projection-форму, но дал только
   1.98 TFLOP/s против 25.76 TFLOP/s Vulkan и был отклонён до full-step пробы.
+- direct hipBLASLt выполнил ту же projection-форму с 97.07 TFLOP/s против
+  26.95 TFLOP/s Vulkan, но production integration потребовал незавершённого
+  Burn/CubeCL stack; на нём сам Vulkan control получил non-finite gradients до
+  запуска candidate.
 
 Принятые P2b/P4/P5 одновременно быстры, finite и находятся внутри loss gate,
 но P5 всё же остался ниже 20 effective TFLOP/s. Поэтому model-level precision
 и мелкие elementwise fusion прекращаются; глобального autocast по-прежнему
 нет. Приоритет переходит к fused head/CE kernel с fp32 softmax и gradient
-accumulation, затем к timeboxed HIP/hipBLASLt или Burn ROCm spike.
+accumulation. Следующая production hipBLASLt/ROCm попытка должна сначала
+получить stable Burn/CubeCL revision, который повторяет finite P5 control без
+изменения accepted Vulkan dependency baseline.
 Изменение vocab относится к отдельному quality/GPU-hour эксперименту и не
 может объявляться победой по raw tok/s.
 

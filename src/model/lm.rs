@@ -200,15 +200,10 @@ fn nonfinite_count<const D: usize>(tensor: Tensor<D>) -> usize {
 
 fn tied_head(hidden: Tensor<3>, embedding: Tensor<2>, dtype: Option<FloatDType>) -> Tensor<3> {
     match dtype {
-        Some(dtype) => {
-            let hidden = hidden.cast(dtype);
-            let embedding = embedding.cast(dtype);
-            #[cfg(feature = "hipblaslt")]
-            if dtype == FloatDType::F16 {
-                return super::hipblaslt::tied_head(hidden, embedding).cast(FloatDType::F32);
-            }
-            hidden.matmul(embedding.transpose().unsqueeze()).cast(FloatDType::F32)
-        }
+        Some(dtype) => hidden
+            .cast(dtype)
+            .matmul(embedding.cast(dtype).transpose().unsqueeze())
+            .cast(FloatDType::F32),
         None => hidden.matmul(embedding.transpose().unsqueeze()),
     }
 }

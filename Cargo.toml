@@ -2,7 +2,7 @@
 name = "quasar"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.95"
 description = "A Mamba-3 language model family and training harness for a single consumer GPU"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uselessgoddess/quasar"
@@ -15,7 +15,9 @@ exclude = ["vendor/burn-mamba"]
 # builds against: the dispatch rewrite dropped the `B: Backend` type parameter
 # from `Tensor`, so the two APIs cannot be mixed inside one module tree. The
 # revision is the dependency's, not a choice -- moving it means moving both.
-burn = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, features = [
+# This coordinated Burn PR revision pins CubeCL's bounded throughput warmup;
+# without that bound a fast RDNA4 CMMA probe can overflow the U32 launch scalar.
+burn = { git = "https://github.com/tracel-ai/burn.git", rev = "856255bd8339fc0e2be5d572b3466d0832ffef21", default-features = false, features = [
     "std",
     "autodiff",
     "dataset",
@@ -37,17 +39,17 @@ burn-mamba = { path = "vendor/burn-mamba", default-features = false, features = 
 # Named directly only to switch on `burnpack`, which burn's own `store` feature
 # leaves off. Burnpack is the one format that preserves `ParamId`s, and without
 # them a reloaded model no longer matches its saved optimizer state.
-burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, features = [
+burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "856255bd8339fc0e2be5d572b3466d0832ffef21", default-features = false, features = [
     "std",
     "burnpack",
 ] }
-burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
-burn-fusion = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
-burn-ir = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
+burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "856255bd8339fc0e2be5d572b3466d0832ffef21", default-features = false, optional = true }
+burn-fusion = { git = "https://github.com/tracel-ai/burn.git", rev = "856255bd8339fc0e2be5d572b3466d0832ffef21", default-features = false, optional = true }
+burn-ir = { git = "https://github.com/tracel-ai/burn.git", rev = "856255bd8339fc0e2be5d572b3466d0832ffef21", default-features = false, optional = true }
 # CubeCL's built-in HIP WMMA compiler targets the RDNA3 intrinsic spelling;
 # gfx1201 needs rocWMMA's GFX12 implementation for every non-native matmul that
 # remains around the hipBLASLt head.
-cubecl-hip = { git = "https://github.com/tracel-ai/cubecl", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1", default-features = false, features = ["rocwmma"], optional = true }
+cubecl-hip = { git = "https://github.com/tracel-ai/cubecl", rev = "0469e4d2424edcbec1ee4b05da03b1b866923bc8", default-features = false, features = ["rocwmma"], optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -134,18 +134,22 @@ fn correctness_gate(input_features: usize, output_features: usize, device: &Devi
     // while still exercising the full output width.  Non-uniform data catches
     // layout/transposition mistakes that an all-one matrix would hide.
     let correctness_rows = 32;
-    let input_data = TensorData::new(
-        patterned_values(correctness_rows * input_features, 31, 15.0, 64.0),
-        [correctness_rows, input_features],
-    );
-    let weight_data = TensorData::new(
-        patterned_values(input_features * output_features, 29, 14.0, 128.0),
-        [input_features, output_features],
-    );
-    let reference_input = Tensor::<2>::from_data(input_data.clone(), device).require_grad();
-    let reference_weight = Tensor::<2>::from_data(weight_data.clone(), device).require_grad();
-    let mixed_input_master = Tensor::<2>::from_data(input_data, device).require_grad();
-    let mixed_weight_master = Tensor::<2>::from_data(weight_data, device).require_grad();
+    let input_values = patterned_values(correctness_rows * input_features, 31, 15.0, 64.0);
+    let weight_values = patterned_values(input_features * output_features, 29, 14.0, 128.0);
+    // CubeCL HIP's pitched rank-2 host upload returns hipErrorInvalidValue on
+    // gfx1201 for this full-width tensor.  Upload the identical contiguous bytes
+    // through its rank-1 path and reshape without a copy so this probe reaches
+    // the matmul backend it is intended to evaluate.
+    let reference_input =
+        tensor_from_flat(input_values.clone(), [correctness_rows, input_features], device)
+            .require_grad();
+    let reference_weight =
+        tensor_from_flat(weight_values.clone(), [input_features, output_features], device)
+            .require_grad();
+    let mixed_input_master =
+        tensor_from_flat(input_values, [correctness_rows, input_features], device).require_grad();
+    let mixed_weight_master =
+        tensor_from_flat(weight_values, [input_features, output_features], device).require_grad();
     let mixed_input = mixed_input_master.clone().cast(FloatDType::F16);
     let mixed_weight = mixed_weight_master.clone().cast(FloatDType::F16);
 
@@ -197,6 +201,10 @@ fn correctness_gate(input_features: usize, output_features: usize, device: &Devi
     anyhow::ensure!(input_grad_error <= 1e-2, "maximum input-gradient error {input_grad_error}");
     anyhow::ensure!(weight_grad_error <= 1e-2, "maximum weight-gradient error {weight_grad_error}");
     Ok(())
+}
+
+fn tensor_from_flat(values: Vec<f32>, shape: [usize; 2], device: &Device) -> Tensor<2> {
+    Tensor::<1>::from_data(TensorData::new(values, [shape[0] * shape[1]]), device).reshape(shape)
 }
 
 fn patterned_values(length: usize, period: usize, center: f32, scale: f32) -> Vec<f32> {

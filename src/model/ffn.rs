@@ -128,4 +128,62 @@ mod tests {
         assert!(input_grad_error < 1e-2, "maximum input gradient error {input_grad_error}");
         assert!(weight_grad_error < 1e-2, "maximum weight gradient error {weight_grad_error}");
     }
+
+    /// What bf16 is for, and why issue #23 asked for it.
+    ///
+    /// fp16 has five exponent bits and stops at 65504, which is why a run
+    /// through that seam needs a loss scale and why halving it down to 1 ends
+    /// the run. bf16 spends three mantissa bits to keep fp32's eight exponent
+    /// bits, so a gradient fp32 can hold is a gradient bf16 can hold and there
+    /// is nothing left for a scale to rescue.
+    #[test]
+    fn bf16_carries_a_backward_that_overflows_f16() {
+        let cfg = config::Model::toy();
+        let device = Device::default().autodiff();
+        let reference = Ffn::new(&cfg, &device);
+        let values: Vec<f32> =
+            (0..(2 * cfg.seq_len * cfg.d_model)).map(|i| ((i % 29) as f32 - 14.0) / 17.0).collect();
+        let data = TensorData::new(values, [2, cfg.seq_len, cfg.d_model]);
+
+        // Far above fp16's 65504 and far below the 3.4e38 that fp32 and bf16
+        // share, so the only thing being measured is the exponent range.
+        let finite_backward = |dtype| {
+            let ffn = Ffn::new_with_dtype(&cfg, dtype, &device)
+                .load_record(reference.clone().into_record());
+            let input = Tensor::<3>::from_data(data.clone(), &device).require_grad();
+            let grads = ffn.forward(input.clone()).sum().mul_scalar(1e20).backward();
+            input.grad(&grads).expect("input gradient").is_finite().all().into_scalar::<bool>()
+        };
+
+        assert!(!finite_backward(FloatDType::F16), "fp16 held a backward it cannot represent");
+        assert!(
+            finite_backward(FloatDType::BF16),
+            "bf16 lost a backward that stayed inside the fp32 exponent range"
+        );
+    }
+
+    /// bf16 buys its range with mantissa bits: eight against fp16's eleven, so
+    /// it is three binary digits coarser and the tolerance says so. The point
+    /// of the test is that the seam is still an approximation of the same
+    /// function and not a different one.
+    #[test]
+    fn bf16_gemms_keep_fp32_masters_and_track_the_fp32_values() {
+        let cfg = config::Model::toy();
+        let device = Device::default();
+        let reference = Ffn::new(&cfg, &device);
+        let mixed = Ffn::new_with_dtype(&cfg, FloatDType::BF16, &device)
+            .load_record(reference.clone().into_record());
+        let values: Vec<f32> =
+            (0..(2 * cfg.seq_len * cfg.d_model)).map(|i| ((i % 29) as f32 - 14.0) / 17.0).collect();
+        let data = TensorData::new(values, [2, cfg.seq_len, cfg.d_model]);
+
+        let reference_output = reference.forward(Tensor::<3>::from_data(data.clone(), &device));
+        let mixed_output = mixed.forward(Tensor::<3>::from_data(data, &device));
+        let error = (reference_output - mixed_output.clone()).abs().max().into_scalar::<f32>();
+
+        assert_eq!(mixed.gate.linear_inner.weight.val().dtype(), FloatDType::F32.into());
+        assert_eq!(mixed_output.dtype(), FloatDType::F32.into());
+        assert!(error > 0.0, "the reduced-precision seam was not exercised");
+        assert!(error < 1e-1, "maximum output error {error}");
+    }
 }

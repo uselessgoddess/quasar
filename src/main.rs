@@ -151,15 +151,15 @@ struct Overrides {
     /// Compute dtype of the output-head GEMM. `fp32` disables the measured
     /// tiny-turbo fp16 default without changing stored weights or logits.
     #[arg(long, value_enum)]
-    head_dtype: Option<HeadDtype>,
+    head_dtype: Option<Precision>,
     /// Compute dtype of the FFN projections. `fp32` disables the measured
     /// tiny-turbo fp16 default while keeping norms and residuals in fp32.
     #[arg(long, value_enum)]
-    ffn_dtype: Option<HeadDtype>,
+    ffn_dtype: Option<Precision>,
     /// Compute dtype of the Mamba input/output projections. `fp32` disables
     /// the measured tiny-turbo default while SSD state math remains fp32.
     #[arg(long, value_enum)]
-    mamba_dtype: Option<HeadDtype>,
+    mamba_dtype: Option<Precision>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -169,10 +169,15 @@ enum Ssd {
     Recalculated,
 }
 
+/// The compute dtype of one GEMM seam, shared by all three `--*-dtype` flags.
+///
+/// `bf16` trades three mantissa bits for fp32's exponent range, so it is the
+/// answer to an fp16 run that spends its steps halving a loss scale.
 #[derive(Clone, Copy, ValueEnum)]
-enum HeadDtype {
+enum Precision {
     Fp32,
     F16,
+    Bf16,
 }
 
 /// The model-shape knobs worth sweeping without editing a preset, because they
@@ -576,20 +581,23 @@ impl Overrides {
         }
         if let Some(dtype) = self.head_dtype {
             run.head_dtype = match dtype {
-                HeadDtype::Fp32 => None,
-                HeadDtype::F16 => Some(config::HeadDtype::F16),
+                Precision::Fp32 => None,
+                Precision::F16 => Some(config::HeadDtype::F16),
+                Precision::Bf16 => Some(config::HeadDtype::Bf16),
             };
         }
         if let Some(dtype) = self.ffn_dtype {
             run.ffn_dtype = match dtype {
-                HeadDtype::Fp32 => None,
-                HeadDtype::F16 => Some(config::FfnDtype::F16),
+                Precision::Fp32 => None,
+                Precision::F16 => Some(config::FfnDtype::F16),
+                Precision::Bf16 => Some(config::FfnDtype::Bf16),
             };
         }
         if let Some(dtype) = self.mamba_dtype {
             run.mamba_dtype = match dtype {
-                HeadDtype::Fp32 => None,
-                HeadDtype::F16 => Some(config::MambaDtype::F16),
+                Precision::Fp32 => None,
+                Precision::F16 => Some(config::MambaDtype::F16),
+                Precision::Bf16 => Some(config::MambaDtype::Bf16),
             };
         }
         run
@@ -635,6 +643,55 @@ mod tests {
             assert_eq!((run.micro_batch, run.accum), (8, 16));
             assert!(run.checkpointing);
         }
+    }
+
+    /// Issue #23: `--head-dtype bf16` was rejected by the parser with
+    /// "possible values: fp32, f16", so the one dtype that does not need a loss
+    /// scale was the one the CLI could not ask for.
+    #[test]
+    fn every_seam_accepts_bf16_from_the_command_line() {
+        let cli = Cli::try_parse_from([
+            "quasar",
+            "train",
+            "tiny-turbo",
+            "--head-dtype",
+            "bf16",
+            "--ffn-dtype",
+            "bf16",
+            "--mamba-dtype",
+            "bf16",
+        ])
+        .expect("bf16 is a compute dtype the trainer supports");
+
+        let Command::Train { preset, run, .. } = cli.command else { panic!("not a train command") };
+        let run = run.apply(preset.run_defaults());
+
+        assert_eq!(run.head_dtype, Some(config::HeadDtype::Bf16));
+        assert_eq!(run.ffn_dtype, Some(config::FfnDtype::Bf16));
+        assert_eq!(run.mamba_dtype, Some(config::MambaDtype::Bf16));
+    }
+
+    /// The flags stay independent: a bf16 head over fp16 projections is a
+    /// diagnosis worth running, and `fp32` still means "off".
+    #[test]
+    fn the_three_dtype_flags_are_set_one_at_a_time() {
+        let cli = Cli::try_parse_from([
+            "quasar",
+            "train",
+            "tiny-turbo",
+            "--head-dtype",
+            "bf16",
+            "--mamba-dtype",
+            "fp32",
+        ])
+        .unwrap();
+
+        let Command::Train { preset, run, .. } = cli.command else { panic!("not a train command") };
+        let run = run.apply(preset.run_defaults());
+
+        assert_eq!(run.head_dtype, Some(config::HeadDtype::Bf16));
+        assert_eq!(run.ffn_dtype, Some(config::FfnDtype::F16), "the preset default is untouched");
+        assert_eq!(run.mamba_dtype, None);
     }
 
     #[test]

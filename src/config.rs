@@ -50,9 +50,14 @@ impl Default for SsdMode {
 /// The model and optimizer records stay fp32; this selects only a transient
 /// cast around the head GEMM. `Option<HeadDtype>` is used in [`crate::train::Run`]
 /// so old run files and presets without a measured precision path remain fp32.
+///
+/// `Bf16` keeps fp32's exponent range at fp16's width, so it needs no loss
+/// scaling and cannot overflow where fp16 does; it pays for that with three
+/// fewer mantissa bits.
 #[derive(Config, Debug, PartialEq, Eq)]
 pub enum HeadDtype {
     F16,
+    Bf16,
 }
 
 /// Reduced compute dtype for the three feed-forward projections.
@@ -63,6 +68,7 @@ pub enum HeadDtype {
 #[derive(Config, Debug, PartialEq, Eq)]
 pub enum FfnDtype {
     F16,
+    Bf16,
 }
 
 /// Reduced compute dtype for the Mamba input/output projections.
@@ -73,6 +79,7 @@ pub enum FfnDtype {
 #[derive(Config, Debug, PartialEq, Eq)]
 pub enum MambaDtype {
     F16,
+    Bf16,
 }
 
 /// What mixes tokens in a layer.

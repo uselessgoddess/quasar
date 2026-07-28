@@ -324,6 +324,49 @@ mod tests {
         }
     }
 
+    /// A rejected step drains both accumulators, so the next step accumulates
+    /// onto nothing.
+    ///
+    /// Issue #23 reported `no method named 'clear' found for struct
+    /// 'GradientsAccumulator<M>'` from a patch that tried to empty them by
+    /// hand. There is no such method because there is nothing to clear:
+    /// `GradientsAccumulator::grads` takes the accumulated gradients out by
+    /// value, and [`Optim::step_scaled`] calls it before it decides whether to
+    /// apply them. The proof is that a rejected NaN step followed by a clean
+    /// step lands the model exactly where the clean step alone would — if the
+    /// NaN survived the rejection, the second step would apply NaN + clean.
+    #[test]
+    fn a_rejected_step_leaves_nothing_behind_for_the_next_one() {
+        let (device, run) = (Device::default().autodiff(), Run::new());
+        let model = Quasar::new(&config::Model::toy(), &device);
+        let tokens = Tensor::<2, burn::tensor::Int>::zeros([2, 8], &device);
+        let clean = |model: &Quasar| model.loss(tokens.clone(), tokens.clone()).total;
+
+        let mut alone = Optim::new(&run, &model);
+        alone.accumulate(&model, clean(&model).backward());
+        let (alone, finite) = alone.step_scaled(1e-2, model.clone(), 1024.0);
+        assert!(finite);
+
+        let mut after_rejection = Optim::new(&run, &model);
+        after_rejection.accumulate(&model, clean(&model).mul_scalar(f64::NAN).backward());
+        let (model, finite) = after_rejection.step_scaled(1e-2, model, 1024.0);
+        assert!(!finite, "the NaN step was applied");
+        after_rejection.accumulate(&model, clean(&model).backward());
+        let (after_rejection, finite) = after_rejection.step_scaled(1e-2, model, 1024.0);
+        assert!(finite, "the discarded gradients were still in the accumulator");
+
+        for (alone, after) in
+            alone.collect(None, None, false).iter().zip(after_rejection.collect(None, None, false))
+        {
+            assert_eq!(
+                alone.to_data().unwrap().to_vec::<f32>().unwrap(),
+                after.to_data().unwrap().to_vec::<f32>().unwrap(),
+                "{} carries the rejected step",
+                alone.full_path()
+            );
+        }
+    }
+
     #[test]
     fn loss_scaler_backs_off_and_grows_after_a_clean_window() {
         let mut scaler = DynamicLossScaler::new(2);

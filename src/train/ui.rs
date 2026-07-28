@@ -42,7 +42,7 @@ impl Dashboard {
             for definition in dashboard.metrics.definitions() {
                 renderer.register_metric(definition);
             }
-            renderer.start(1, Some(total_steps));
+            renderer.start(1, 0, Some(total_steps));
             renderer.start_split("optimizer steps", total_steps);
             renderer.update_split(completed_steps);
         }
@@ -249,7 +249,13 @@ mod tests {
     }
 
     impl TrainingProgressLogger for Recorder {
-        fn start(&mut self, _total_epochs: usize, _total_items: Option<usize>) {}
+        fn start(
+            &mut self,
+            _total_epochs: usize,
+            _starting_epoch: usize,
+            _total_items: Option<usize>,
+        ) {
+        }
         fn update_epoch(&mut self, _epoch: usize) {}
         fn start_split(&mut self, _split: &str, _total_items: usize) {}
         fn update_split(&mut self, items: usize) {

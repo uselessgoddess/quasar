@@ -15,7 +15,7 @@ exclude = ["vendor/burn-mamba"]
 # builds against: the dispatch rewrite dropped the `B: Backend` type parameter
 # from `Tensor`, so the two APIs cannot be mixed inside one module tree. The
 # revision is the dependency's, not a choice -- moving it means moving both.
-burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, features = [
+burn = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, features = [
     "std",
     "autodiff",
     "dataset",
@@ -37,10 +37,14 @@ burn-mamba = { path = "vendor/burn-mamba", default-features = false, features = 
 # Named directly only to switch on `burnpack`, which burn's own `store` feature
 # leaves off. Burnpack is the one format that preserves `ParamId`s, and without
 # them a reloaded model no longer matches its saved optimizer state.
-burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, features = [
+burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, features = [
     "std",
     "burnpack",
 ] }
+burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
+burn-fusion = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
+burn-ir = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
+cubecl-hip = { git = "https://github.com/tracel-ai/cubecl", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1", default-features = false, optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -83,7 +87,17 @@ gpu = ["burn/autotune", "burn/fusion", "burn-mamba/fusion"]
 wgpu = ["gpu", "burn/wgpu", "burn-mamba/backend-wgpu"]
 vulkan = ["gpu", "burn/vulkan", "burn-mamba/backend-vulkan"]
 rocm = ["gpu", "burn/rocm", "burn-mamba/backend-rocm"]
+hipblaslt = [
+    "rocm",
+    "dep:burn-cubecl",
+    "dep:burn-fusion",
+    "dep:burn-ir",
+    "dep:cubecl-hip",
+]
 cuda = ["gpu", "burn/cuda", "burn-mamba/backend-cuda"]
+
+[build-dependencies]
+cc = "1"
 
 [profile.release]
 opt-level = 3

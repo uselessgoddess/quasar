@@ -3,6 +3,8 @@
 mod attention;
 mod block;
 mod ffn;
+#[cfg(feature = "hipblaslt")]
+mod hipblaslt;
 mod init;
 mod lm;
 

@@ -119,7 +119,7 @@ jobs:
   # exact Burn/CubeCL/Vulkan stack can reach RDNA4 matrix throughput at all.
   # Precision work is gated on these numbers instead of a global dtype guess.
   gpu-benchmark:
-    needs: backend-spike
+    needs: backend-integration
     runs-on: self-hosted
     timeout-minutes: 60
     steps:
@@ -201,6 +201,51 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-spike-diagnostics
+          path: benchmark-logs/
+
+  # P8 connects the accepted vendor-library projection to Burn's real ROCm
+  # allocations and autodiff graph. It owns the card before the long historical
+  # suite so native compilation, both gradients, quality and optimizer-step
+  # speed fail quickly and preserve focused diagnostics.
+  backend-integration:
+    needs: backend-spike
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Record native integration runtime
+        run: |
+          mkdir -p benchmark-logs
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            cargo -V
+            hipcc --version
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram --showclocks \
+              --showuse --showtemp --showpower
+            test -f /opt/rocm/include/hipblaslt/hipblaslt.h
+            ldconfig -p | grep hipblaslt
+          } 2>&1 | tee benchmark-logs/hipblaslt-integration-environment.log
+      - name: Check hipBLASLt integration source
+        run: |
+          cargo fmt --package quasar --check
+          cargo clippy --tests --no-default-features --features hipblaslt
+      - name: P8 — native tied-head forward and gradient regression
+        run: >-
+          cargo test --release --no-default-features --features hipblaslt
+          native_tied_head_matches_rocm_forward_and_both_gradients -- --nocapture
+      - name: P8 — full optimizer-step Vulkan vs ROCm plus hipBLASLt
+        run: examples/hipblaslt_tied_head_ab.sh
+      - name: Preserve backend-integration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-integration-diagnostics
           path: benchmark-logs/
 
   smoke:

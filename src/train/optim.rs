@@ -150,9 +150,9 @@ impl Optim {
     ) -> Quasar {
         let model = match self.hidden.is_empty() {
             true => model,
-            false => self.muon.step(lr, model, muon_grads),
+            false => self.muon.step(lr.into(), model, muon_grads),
         };
-        self.adamw.step(lr, model, adamw_grads)
+        self.adamw.step(lr.into(), model, adamw_grads)
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), RecordError> {

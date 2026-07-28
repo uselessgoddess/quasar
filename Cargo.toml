@@ -44,7 +44,10 @@ burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdf
 burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
 burn-fusion = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
 burn-ir = { git = "https://github.com/tracel-ai/burn.git", rev = "36cf9daebdfd2f4a8bb75eae8e0e0a5aff4f512b", default-features = false, optional = true }
-cubecl-hip = { git = "https://github.com/tracel-ai/cubecl", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1", default-features = false, optional = true }
+# CubeCL's built-in HIP WMMA compiler targets the RDNA3 intrinsic spelling;
+# gfx1201 needs rocWMMA's GFX12 implementation for every non-native matmul that
+# remains around the hipBLASLt head.
+cubecl-hip = { git = "https://github.com/tracel-ai/cubecl", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1", default-features = false, features = ["rocwmma"], optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

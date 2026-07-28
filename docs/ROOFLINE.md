@@ -83,3 +83,16 @@ GiB, но замедлил полный step с 5.13 до 4.61 TFLOP/s (−10.15
 chunking существующего autodiff graph; после двух кандидатов ниже 20
 effective TFLOP/s дальнейшие локальные fusion остановлены до такого backend
 spike.
+
+После просьбы продолжить точечный
+[f16 gate](https://github.com/uselessgoddess/quasar/actions/runs/30329788994)
+изменил этот вывод. С dynamic loss scale 1024 тот же tied head сохранил fp32
+master/logits/loss, дал 12 134 против 10 548 tok/s (+15.04%), снизил
+performance peak VRAM с 14.111 до 12.111 GiB и удержал максимальное trailing-3
+loss-отклонение на 0.1243% при лимите 0.5%. F16 head принят в `tiny-turbo`;
+глобальный dtype по-прежнему не используется.
+
+Следующий downstream gate расширяет f16 ровно на одно крупное projection
+family. Если этот контролируемый P4 не приближает full step к обязательным
+20 effective TFLOP/s, решение возвращается к fused head/CE или backend spike,
+а не к дальнейшему бесконтрольному autocast.

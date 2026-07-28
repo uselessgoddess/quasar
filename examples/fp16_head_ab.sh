@@ -28,9 +28,10 @@ run_arm() {
 
     case "$phase" in
         performance)
-            # Use the full window in both arms. Earlier P0 measurements exposed
-            # a late autotune that can otherwise bias a three-sample median.
-            phase_args=(--warmup 1 --steps 9 --max-steps 9 --vary-tokens false)
+            # Start with the required three-sample median. Earlier P0 runs show
+            # a late autotune, so an initial spread above 3% automatically
+            # extends the same arm to nine samples.
+            phase_args=(--warmup 1 --steps 3 --max-steps 9 --vary-tokens false)
             ;;
         quality)
             # Twenty measured steps are twice the horizon that rejected BF16.

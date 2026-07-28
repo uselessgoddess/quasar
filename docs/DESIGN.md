@@ -256,28 +256,28 @@ backend не выполняет. `base` тем более будет недоо�
 
 ### 4.1 Итоговая performance-стратегия для RDNA4
 
-P0/P1 issue #21 измерили production на 5.11 effective TFLOP/s и bf16 GEMM
-roofline на 43–44 TFLOP/s. Точечный bf16 tied head дал 5.84 TFLOP/s и
-13.359 GiB, но нарушил loss gate (7.37% против допустимых 0.5%), поэтому
-production precision path остаётся **fp32**. Точный recomputed cross-entropy
-блоками по 256 позиций затем снизил память с 14.360 до 10.453 GiB, но
-замедлил full step с 5.13 до 4.61 TFLOP/s. Batch 8×16 дал 2.05 TFLOP/s и
-15.852 GiB. P3 поэтому тоже откатан.
+P0/P1 issue #21 измерили production на 5.11 effective TFLOP/s и bf16/f16 GEMM
+roofline на 42–44 TFLOP/s. Точечный bf16 tied head дал 5.84 TFLOP/s и
+13.359 GiB, но нарушил loss gate (7.37% против допустимых 0.5%). Точный
+recomputed cross-entropy затем снизил память с 14.360 до 10.453 GiB, но
+замедлил full step с 5.13 до 4.61 TFLOP/s; batch 8×16 дал 2.05 TFLOP/s и
+15.852 GiB. Оба пути откатаны.
 
-Это не запрет bf16 как hardware dtype: isolated Vulkan matrix path работает.
-Запрещены именно следующие необоснованные high-level cast и chunk graph.
-После двух кандидатов ниже 20 TFLOP/s срабатывает stop/pivot: P4 не расширяет
-precision seam, уже нарушивший trajectory, а P5–P7 не продолжаются как набор
-малых изменений.
+Повтор того же минимального seam в f16 с dynamic loss scaling прошёл:
+**12 134 tok/s, 5.87 TFLOP/s и 12.111 GiB** против 10 548 tok/s, 5.10 TFLOP/s
+и 14.111 GiB у paired fp32. Максимальное отклонение trailing-3 loss за
+21 точку — 0.1243% при лимите 0.5%, non-finite count — ноль. Поэтому
+`tiny-turbo` использует f16 только для tied output-head GEMM; master weights,
+optimizer state, остальная модель, logits, softmax и loss остаются fp32.
+Dynamic-scaler state входит в checkpoint, а `--head-dtype fp32` отключает путь.
 
-Выбранный backend path — fused `640×32768` head kernel: bf16 projection,
-fp32 softmax/loss, fp32 gradient accumulation и fp32 master weight, без
-materialized logits и без сотен 256-row matmul dispatch. Сначала он проходит
-isolated roofline/numerical gate, затем paired full-step gate. Если Vulkan
-остаётся нестабилен или full step не превышает 20 TFLOP/s, следующий шаг —
-ограниченный spike HIP/hipBLASLt или Burn ROCm, а не дальнейшие elementwise
-fusion. Числа, A/B и причины откатов находятся в
-[`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
+Этот результат не разрешает глобальный reduced dtype. P4 расширяет precision
+по одному большому projection family и повторяет numerical, trajectory,
+throughput и VRAM gates. Если после такого контролируемого P4 full step
+остаётся ниже 20 TFLOP/s, действует stop/pivot: fused head/CE kernel с fp32
+softmax/gradient accumulation, затем ограниченный spike HIP/hipBLASLt или Burn
+ROCm, а не набор мелких elementwise fusion. Числа, A/B и причины решений
+находятся в [`TRAINING_SPEED.md`](TRAINING_SPEED.md), backend matrix — в
 [`ROOFLINE.md`](ROOFLINE.md).
 
 ## 5. Данные

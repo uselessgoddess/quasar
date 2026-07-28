@@ -13,7 +13,7 @@ use burn::store::{BurnpackStore, ModuleSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Quasar;
-use crate::train::Optim;
+use crate::train::{DynamicLossScaler, Optim};
 
 /// Where a run stands, beside its weights.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -21,6 +21,10 @@ pub struct State {
     /// Optimizer steps already taken; the run resumes at this index.
     pub step: usize,
     pub tokens: u64,
+    /// Persisted because changing the loss scale across a resume changes the
+    /// reduced-precision gradient path. Old fp32 checkpoints omit it.
+    #[serde(default)]
+    pub loss_scaler: Option<DynamicLossScaler>,
 }
 
 #[derive(Debug)]
@@ -110,7 +114,13 @@ mod tests {
         let saved = Quasar::new(&cfg, &device);
         let root = tempfile::tempdir().unwrap();
 
-        save(&dir(root.path(), 3), State { step: 3, tokens: 0 }, &saved, &optim(&saved)).unwrap();
+        save(
+            &dir(root.path(), 3),
+            State { step: 3, tokens: 0, loss_scaler: None },
+            &saved,
+            &optim(&saved),
+        )
+        .unwrap();
 
         let mut loaded = Quasar::new(&cfg, &device);
         let optim = optim(&loaded);
@@ -126,10 +136,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         for step in [2, 11] {
-            let state = State { step, tokens: 0 };
+            let state = State { step, tokens: 0, loss_scaler: None };
             save(&dir(root.path(), step), state, &model, &optim(&model)).unwrap();
         }
 
         assert_eq!(latest(root.path()).unwrap(), dir(root.path(), 11));
+    }
+
+    #[test]
+    fn old_checkpoint_state_without_a_loss_scaler_still_loads() {
+        let state: State = serde_json::from_str(r#"{"step":7,"tokens":917504}"#).unwrap();
+
+        assert_eq!(state.step, 7);
+        assert_eq!(state.tokens, 917_504);
+        assert!(state.loss_scaler.is_none());
     }
 }

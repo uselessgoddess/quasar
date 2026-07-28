@@ -16,7 +16,7 @@ use burn::tensor::{DeviceConfig, FloatDType};
 use clap::{Parser, ValueEnum};
 use quasar::config::{Model, SsdMode};
 use quasar::model::Quasar;
-use quasar::train::{Optim, Run};
+use quasar::train::{DynamicLossScaler, Optim, Run};
 
 #[derive(Parser)]
 #[command(about = "Measure a few synchronized tiny-turbo training steps")]
@@ -55,48 +55,6 @@ struct Args {
     /// intentionally unsuitable for a throughput claim.
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     vary_tokens: bool,
-}
-
-/// Minimal dynamic scaler for the fp16 output-head experiment.
-///
-/// The scaler starts conservatively, halves immediately after a non-finite
-/// optimizer step, and grows only after a long clean window. The benchmark
-/// rejects any non-finite step, but keeping the state transition here makes the
-/// precision seam usable for a longer quality run without pretending a fixed
-/// multiplier is dynamic loss scaling.
-#[derive(Clone, Copy, Debug)]
-struct DynamicLossScaler {
-    scale: f64,
-    finite_steps: usize,
-    growth_interval: usize,
-}
-
-impl DynamicLossScaler {
-    const INITIAL: f64 = 1024.0;
-    const MIN: f64 = 1.0;
-    const MAX: f64 = 65536.0;
-
-    fn new(growth_interval: usize) -> Self {
-        assert!(growth_interval > 0, "growth interval must be positive");
-        Self { scale: Self::INITIAL, finite_steps: 0, growth_interval }
-    }
-
-    fn scale(&self) -> f64 {
-        self.scale
-    }
-
-    fn update(&mut self, finite: bool) {
-        if finite {
-            self.finite_steps += 1;
-            if self.finite_steps == self.growth_interval {
-                self.scale = (self.scale * 2.0).min(Self::MAX);
-                self.finite_steps = 0;
-            }
-        } else {
-            self.scale = (self.scale / 2.0).max(Self::MIN);
-            self.finite_steps = 0;
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -358,19 +316,6 @@ mod tests {
             first.windows(2).all(|pair| pair[1] == (pair[0] + 1) % cfg.vocab_size as i32),
             "the trajectory must retain one learnable next-token relation"
         );
-    }
-
-    #[test]
-    fn loss_scaler_backs_off_and_grows_after_a_clean_window() {
-        let mut scaler = DynamicLossScaler::new(2);
-        assert_eq!(scaler.scale(), 1024.0);
-
-        scaler.update(false);
-        assert_eq!(scaler.scale(), 512.0);
-        scaler.update(true);
-        assert_eq!(scaler.scale(), 512.0);
-        scaler.update(true);
-        assert_eq!(scaler.scale(), 1024.0);
     }
 }
 

@@ -23,7 +23,8 @@ cargo run --release --no-default-features --features vulkan \
     --example train_bench -- \
     --model tiny-turbo --micro-batch 4 --accum 32 \
     --warmup 1 --steps 3 --max-steps 9 --dtype f32 --ssd serial \
-    --checkpointing false --muon true 2>&1 | tee "$log_dir/baseline.log"
+    --checkpointing false --muon true --head-dtype f16 \
+    2>&1 | tee "$log_dir/baseline.log"
 benchmark_status=${PIPESTATUS[0]}
 set -e
 

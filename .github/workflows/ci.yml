@@ -154,6 +154,7 @@ jobs:
           --model tiny-turbo --micro-batch 1 --accum 1
           --warmup 1 --steps 3 --max-steps 3
           --dtype f32 --ssd serial --checkpointing false --muon true
+          --head-dtype f16
           2>&1 | tee ../../benchmark-logs/profile.log
       - name: P1 — dense GEMM roofline
         run: examples/roofline.sh

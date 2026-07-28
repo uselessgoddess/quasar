@@ -24,9 +24,50 @@ use burn::optim::{
 };
 use burn::store::{ModuleSnapshot, RecordError};
 use burn::tensor::{Bool, Gradients, Tensor};
+use serde::{Deserialize, Serialize};
 
 use crate::model::Quasar;
 use crate::train::Run;
+
+/// Dynamic loss scale for the isolated fp16 output-head path.
+///
+/// A non-finite step is discarded before either optimizer sees it. The scale
+/// then halves and the caller retries the same deterministic batch. A long
+/// clean window grows it again, bounded at both ends.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DynamicLossScaler {
+    scale: f64,
+    finite_steps: usize,
+    growth_interval: usize,
+}
+
+impl DynamicLossScaler {
+    pub const INITIAL: f64 = 1024.0;
+    pub const MIN: f64 = 1.0;
+    pub const MAX: f64 = 65536.0;
+
+    pub fn new(growth_interval: usize) -> Self {
+        assert!(growth_interval > 0, "growth interval must be positive");
+        Self { scale: Self::INITIAL, finite_steps: 0, growth_interval }
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    pub fn update(&mut self, finite: bool) {
+        if finite {
+            self.finite_steps += 1;
+            if self.finite_steps == self.growth_interval {
+                self.scale = (self.scale * 2.0).min(Self::MAX);
+                self.finite_steps = 0;
+            }
+        } else {
+            self.scale = (self.scale / 2.0).max(Self::MIN);
+            self.finite_steps = 0;
+        }
+    }
+}
 
 /// Both optimizers and the accumulator each of them feeds from.
 pub struct Optim {
@@ -281,5 +322,18 @@ mod tests {
                 before.full_path()
             );
         }
+    }
+
+    #[test]
+    fn loss_scaler_backs_off_and_grows_after_a_clean_window() {
+        let mut scaler = DynamicLossScaler::new(2);
+        assert_eq!(scaler.scale(), 1024.0);
+
+        scaler.update(false);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 512.0);
+        scaler.update(true);
+        assert_eq!(scaler.scale(), 1024.0);
     }
 }

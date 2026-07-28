@@ -45,6 +45,16 @@ impl Default for SsdMode {
     }
 }
 
+/// Reduced compute dtype for the output projection during training.
+///
+/// The model and optimizer records stay fp32; this selects only a transient
+/// cast around the head GEMM. `Option<HeadDtype>` is used in [`crate::train::Run`]
+/// so old run files and presets without a measured precision path remain fp32.
+#[derive(Config, Debug, PartialEq, Eq)]
+pub enum HeadDtype {
+    F16,
+}
+
 /// What mixes tokens in a layer.
 ///
 /// A pure-SSM stack recalls an arbitrary earlier token poorly — its memory is a

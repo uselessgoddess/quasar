@@ -2,6 +2,7 @@
 
 use burn::nn::{RmsNorm, RmsNormConfig};
 use burn::prelude::*;
+use burn::tensor::FloatDType;
 use burn_mamba::mamba3::prelude::{Mamba3, Mamba3SsdPath};
 
 use crate::config::{self, Mixer, SsdMode};
@@ -35,15 +36,30 @@ pub struct Block {
 
 impl Block {
     pub fn new(cfg: &config::Model, layer: usize, ssd_mode: SsdMode, device: &Device) -> Self {
+        Self::new_with_ffn_dtype(cfg, layer, ssd_mode, None, device)
+    }
+
+    /// Build a block with an optional reduced compute dtype for its FFN GEMMs.
+    pub fn new_with_ffn_dtype(
+        cfg: &config::Model,
+        layer: usize,
+        ssd_mode: SsdMode,
+        ffn_dtype: Option<FloatDType>,
+        device: &Device,
+    ) -> Self {
         let mix = match cfg.mixer(layer) {
             Mixer::Ssm => Mix::Ssm(cfg.mamba().init(device)),
             Mixer::Attention => Mix::Attn(Attention::new(cfg, device)),
+        };
+        let ffn = match ffn_dtype {
+            Some(dtype) => Ffn::new_with_dtype(cfg, dtype, device),
+            None => Ffn::new(cfg, device),
         };
         Self {
             norm_mix: RmsNormConfig::new(cfg.d_model).init(device),
             mix,
             norm_ffn: RmsNormConfig::new(cfg.d_model).init(device),
-            ffn: Ffn::new(cfg, device),
+            ffn,
             ssd_chunk: cfg.ssd_chunk_len(),
             ssd_mode,
         }

@@ -54,13 +54,24 @@ impl Quasar {
         head_dtype: Option<FloatDType>,
         device: &Device,
     ) -> Self {
+        Self::new_with_ssd_and_dtypes(cfg, ssd_mode, head_dtype, None, device)
+    }
+
+    /// Build with independent SSD, output-head and FFN execution choices.
+    pub fn new_with_ssd_and_dtypes(
+        cfg: &config::Model,
+        ssd_mode: config::SsdMode,
+        head_dtype: Option<FloatDType>,
+        ffn_dtype: Option<FloatDType>,
+        device: &Device,
+    ) -> Self {
         cfg.validate().expect("model config is invalid");
         Self {
             embed: EmbeddingConfig::new(cfg.vocab_size, cfg.d_model)
                 .with_initializer(init::normal())
                 .init(device),
             blocks: (0..cfg.n_layers)
-                .map(|i| Block::new(cfg, i, ssd_mode.clone(), device))
+                .map(|i| Block::new_with_ffn_dtype(cfg, i, ssd_mode.clone(), ffn_dtype, device))
                 .collect(),
             norm: RmsNormConfig::new(cfg.d_model).init(device),
             head: (!cfg.tied_embeddings).then(|| {

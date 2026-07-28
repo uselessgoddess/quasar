@@ -39,7 +39,11 @@ struct Args {
     /// Explicit compute dtype for the output-head GEMM; everything else stays
     /// in the device dtype (fp32 in the paired precision experiment).
     #[arg(long, value_enum)]
-    head_dtype: Option<HeadDtype>,
+    head_dtype: Option<ReducedDtype>,
+    /// Explicit compute dtype for the three GEMMs in every FFN. Norms,
+    /// SwiGLU elementwise math and the residual stream remain fp32.
+    #[arg(long, value_enum)]
+    ffn_dtype: Option<ReducedDtype>,
     #[arg(long, value_enum, default_value_t = Ssd::Serial)]
     ssd: Ssd,
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
@@ -72,7 +76,7 @@ enum Dtype {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum HeadDtype {
+enum ReducedDtype {
     F16,
     Bf16,
 }
@@ -108,11 +112,11 @@ impl From<Dtype> for FloatDType {
     }
 }
 
-impl From<HeadDtype> for FloatDType {
-    fn from(value: HeadDtype) -> Self {
+impl From<ReducedDtype> for FloatDType {
+    fn from(value: ReducedDtype) -> Self {
         match value {
-            HeadDtype::F16 => Self::F16,
-            HeadDtype::Bf16 => Self::BF16,
+            ReducedDtype::F16 => Self::F16,
+            ReducedDtype::Bf16 => Self::BF16,
         }
     }
 }
@@ -142,10 +146,11 @@ fn main() -> Result<()> {
     device.seed(1337);
 
     let ssd_mode = SsdMode::from(args.ssd);
-    let mut model = Quasar::new_with_ssd_and_head_dtype(
+    let mut model = Quasar::new_with_ssd_and_dtypes(
         &cfg,
         ssd_mode.clone(),
         args.head_dtype.map(FloatDType::from),
+        args.ffn_dtype.map(FloatDType::from),
         &device,
     );
     let run = Run::new()
@@ -157,14 +162,16 @@ fn main() -> Result<()> {
     let mut optim = Optim::new(&run, &model);
     let (input, target) = tokens(&cfg, args.micro_batch, &device);
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
-    let mut loss_scaler =
-        matches!(args.head_dtype, Some(HeadDtype::F16)).then(|| DynamicLossScaler::new(200));
+    let mut loss_scaler = (matches!(args.head_dtype, Some(ReducedDtype::F16))
+        || matches!(args.ffn_dtype, Some(ReducedDtype::F16)))
+    .then(|| DynamicLossScaler::new(200));
 
     println!(
-        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} vary_tokens={} tokens/step={tokens_per_step}",
+        "bench device={base_device:?} model={:?} dtype={:?} head_dtype={:?} ffn_dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} vary_tokens={} tokens/step={tokens_per_step}",
         args.model,
         args.dtype,
         args.head_dtype,
+        args.ffn_dtype,
         args.micro_batch,
         args.accum,
         args.ssd,

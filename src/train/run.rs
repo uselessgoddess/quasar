@@ -636,9 +636,13 @@ mod tests {
             * run.accum as u64
             * config::Model::tiny().seq_len as u64;
 
-        // A 162.5M-parameter model needs roughly 20 tokens per parameter, not
-        // the 96.8 tokens per parameter scheduled by the old 60k-step recipe.
-        assert!((3_000_000_000..=3_500_000_000).contains(&tokens), "{tokens} tokens");
+        // `TOKENS_PER_PARAM` is a floor, not a target: the default schedules 22
+        // tokens per parameter where the old 60k-step recipe scheduled 96.8.
+        // Stated against the floor rather than a literal because issue #23
+        // narrowed the vocabulary, which moved the parameter count and so the
+        // floor with it — the same recipe, still above it.
+        let floor = config::Model::tiny().chinchilla_tokens() as u64;
+        assert!((floor..floor * 3 / 2).contains(&tokens), "{tokens} tokens against {floor}");
     }
 
     #[test]
@@ -663,8 +667,12 @@ mod tests {
         let tokens_per_step = 96 * 2_048;
         let throughput = 1_700.0;
         let steps_per_hour = throughput * 3_600.0 / tokens_per_step as f64;
+        // The `tiny` of issue #7, at the 32768 vocabulary it was measured on —
+        // issue #23 narrowed that, and a reported measurement does not move
+        // with a later config.
+        let measured = config::Model { vocab_size: 32_768, ..config::Model::tiny() };
         let (eta_hours, tflops) =
-            speed(40, 60_000, tokens_per_step, throughput, config::Model::tiny().flops_per_token());
+            speed(40, 60_000, tokens_per_step, throughput, measured.flops_per_token());
 
         assert!((steps_per_hour - 31.1).abs() < 0.1);
         assert!((eta_hours / 24.0 - 80.3).abs() < 0.1);

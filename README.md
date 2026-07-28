@@ -11,15 +11,18 @@ nothing to slide over:
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
 | `factorio-nano` | 3.6M | 8.2M | 0.05 GiB | 0.12 GiB | 134 |
-| `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
-| `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
+| `tiny-turbo` | 62.6M | 129.8M | 0.93 GiB | 1.09 GiB | 14 |
+| `tiny` | 146.7M | 329.4M | 2.19 GiB | 6.62 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
 
 `docs/DESIGN.md` justifies every number above, states the training-time budget
 honestly, and explains why this is not a mixture of experts.
 [`docs/MEMORY.md`](docs/MEMORY.md) takes apart the last two columns — where the
 VRAM actually goes, which burn-mamba setting moves it, and what `tiny-turbo`
-gives up to fit eleven estimated micro-batches where `tiny` fits two.
+gives up to fit fourteen estimated micro-batches where `tiny` fits two.
+
+`tiny` and `tiny-turbo` share an 8192-token vocabulary; only `base` is large
+enough for 32768 to be worth its embedding, its head GEMM and its logits.
 
 ## Pipeline
 
@@ -31,7 +34,7 @@ cargo run --release -- budget tiny
 hf download HuggingFaceFW/fineweb-edu --repo-type dataset \
     --include "sample/10BT/*" --local-dir data/fineweb-edu
 
-cargo run --release -- tokenizer data/fineweb-edu --vocab-size 32768
+cargo run --release -- tokenizer data/fineweb-edu --vocab-size 8192
 cargo run --release -- prepare data/fineweb-edu --out data/shards
 cargo run --release -- train tiny --data data/shards --out runs/tiny
 

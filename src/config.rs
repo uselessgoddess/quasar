@@ -21,6 +21,22 @@ use burn::prelude::*;
 /// shorter than this is not a smaller experiment but an unfinished one.
 pub const TOKENS_PER_PARAM: usize = 20;
 
+/// The vocabulary of the models that train on one 16 GB card.
+///
+/// A vocabulary is not free at `d_model 640`. It is a tied `vocab × 640`
+/// matrix, a `640 × vocab` GEMM at every position of every step, and — the
+/// term that decides the micro-batch — the logits and their log-softmax, both
+/// `vocab` floats per position and both alive at once in the backward.
+/// `a_narrow_vocabulary_pays_for_itself_three_times` measures all three on
+/// `tiny-turbo`: at 32768 the logits alone cost 1034 MiB at the micro-batch of
+/// 4 that issue #23 ran, the embedding is 27% of the parameters, and the head
+/// is 26% of the forward FLOPs. At 8192 that is 264 MiB, 8% and 8%.
+///
+/// What the width buys is longer BPE merges, which is worth much less at this
+/// scale than the accounting above costs. `base` keeps 32768 because its
+/// embedding is 4.4% of a 1.1B budget rather than a quarter of a 78M one.
+pub const SMALL_VOCAB: usize = 8192;
+
 use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 
 /// How burn-mamba evaluates the chunked SSD recurrence during training.
@@ -168,13 +184,19 @@ pub struct Model {
 }
 
 impl Model {
-    /// `quasar-tiny`, 164M — the model intended for the first full run.
+    /// `quasar-tiny`, 147M — the model intended for the first full run.
     ///
     /// Deep and thin (24 × 640) because MobileLLM measured depth beating width
-    /// below 1B. Its compute-efficient target is about 3.25B tokens; the actual
+    /// below 1B. Its compute-efficient target is about 2.9B tokens; the actual
     /// wall-clock budget is derived from measured backend throughput.
+    ///
+    /// The vocabulary is [`SMALL_VOCAB`] and not `base`'s 32768. It shares
+    /// `d_model 640` with `tiny-turbo` and so shares the whole of that
+    /// argument, and it pays the logits term at twice the sequence length:
+    /// 517 MiB per micro-batch at 32768 against 133 MiB here, on a card that
+    /// only fits a micro-batch of two either way.
     pub fn tiny() -> Self {
-        Self::new(32_768, 640, 24)
+        Self::new(SMALL_VOCAB, 640, 24)
             .with_seq_len(2048)
             .with_state_rank(128)
             .with_head_dim(64)
@@ -207,7 +229,7 @@ impl Model {
             .with_tied_embeddings(false)
     }
 
-    /// `quasar-tiny-turbo`, 78M — the cheapest model still worth training.
+    /// `quasar-tiny-turbo`, 63M — the cheapest model still worth training.
     ///
     /// Every cut here is one the memory accounting says is paid for twice, in
     /// activations and in FLOPs, and none of them is a quality knob of the first
@@ -218,9 +240,13 @@ impl Model {
     /// micro-batch above one on 16 GB, which is where the throughput was lost.
     /// The 640 x 12 shape has practically the same parameter and FLOP budgets
     /// as 512 x 20, but measured faster because its GEMMs are wider and 40%
-    /// fewer layers are dispatched sequentially.
+    /// fewer layers are dispatched sequentially. [`SMALL_VOCAB`] is the last of
+    /// those cuts and the widest-reaching: it takes three quarters off the head
+    /// GEMM that `docs/TRAINING_SPEED.md` measures as the step's single most
+    /// expensive dispatch, three quarters off the logits that dominate this
+    /// preset's activations, and a fifth off the parameters.
     pub fn tiny_turbo() -> Self {
-        Self::new(32_768, 640, 12)
+        Self::new(SMALL_VOCAB, 640, 12)
             .with_seq_len(1024)
             .with_state_rank(64)
             .with_head_dim(64)
@@ -621,7 +647,33 @@ mod tests {
         let turbo = Model::tiny_turbo();
 
         assert_eq!((turbo.d_model, turbo.n_layers, turbo.attn_heads), (640, 12, 10));
-        assert!((78_000_000..79_000_000).contains(&turbo.budget().total));
+        assert!((62_000_000..63_000_000).contains(&turbo.budget().total));
+    }
+
+    /// Issue #23 asked for a narrower vocabulary on the two presets that have
+    /// to fit one 16 GB card. It is not a quality knob traded for memory: the
+    /// width is charged three separate times, and only one of the three is the
+    /// embedding people think of when they read `vocab_size`.
+    #[test]
+    fn a_narrow_vocabulary_pays_for_itself_three_times() {
+        let turbo = Model::tiny_turbo();
+        let wide = Model { vocab_size: 32_768, ..turbo.clone() };
+        assert_eq!(turbo.vocab_size, SMALL_VOCAB);
+
+        let share = |cfg: &Model| cfg.budget().embedding as f64 / cfg.budget().total as f64;
+        // The parameters, which a tied head spends twice over.
+        assert!(share(&wide) > 0.26, "{:.3}", share(&wide));
+        assert!(share(&turbo) < 0.09, "{:.3}", share(&turbo));
+
+        // The head GEMM, run at every position of every step.
+        let head = |cfg: &Model| 2.0 * cfg.d_model as f64 * cfg.vocab_size as f64;
+        assert!(head(&wide) / wide.flops_per_token() > 0.25);
+        assert!(head(&turbo) / turbo.flops_per_token() < 0.09);
+
+        // The logits and their log-softmax, at the micro-batch issue #23 ran.
+        let mib = |cfg: &Model| cfg.activations(4).head / 1048576.0;
+        assert!((1030.0..1040.0).contains(&mib(&wide)), "{:.0} MiB", mib(&wide));
+        assert!((260.0..270.0).contains(&mib(&turbo)), "{:.0} MiB", mib(&turbo));
     }
 
     #[test]
@@ -659,12 +711,13 @@ mod tests {
 
     /// The `tiny` run in issue #11 held `micro_batch 1` and OOM'd above it. The
     /// estimate reproduces that for the dense scores the old attention built —
-    /// `attn_window = None` is exactly what a mask-only window cost — and shows
-    /// where the fixes move the line.
+    /// `attn_window = None` is exactly what a mask-only window cost, and 32768
+    /// is the vocabulary `tiny` carried then — and shows where the fixes move
+    /// the line.
     #[test]
     fn the_estimate_reproduces_the_reported_ceiling() {
         let gib = (16u64 << 30) as f64;
-        let dense = Model::tiny().with_attn_window(None);
+        let dense = Model { vocab_size: 32_768, ..Model::tiny() }.with_attn_window(None);
 
         assert_eq!(dense.micro_batch_within(gib, 12.0), 1, "what the issue reported");
         assert_eq!(Model::tiny().micro_batch_within(gib, 12.0), 2, "blocking the window");

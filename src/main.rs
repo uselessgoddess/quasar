@@ -43,7 +43,9 @@ enum Command {
         corpus: Vec<PathBuf>,
         #[arg(long, default_value = "data/tokenizer.json")]
         out: PathBuf,
-        #[arg(long, default_value_t = 32_768)]
+        /// Defaults to what `tiny` and `tiny-turbo` are shaped for. `base` is
+        /// the only preset that wants 32768, and it has to ask.
+        #[arg(long, default_value_t = config::SMALL_VOCAB)]
         vocab_size: usize,
         /// Documents to fit on. The full corpus is not needed and would take
         /// hours; BPE merges converge long before it.
@@ -692,6 +694,23 @@ mod tests {
         assert_eq!(run.head_dtype, Some(config::HeadDtype::Bf16));
         assert_eq!(run.ffn_dtype, Some(config::FfnDtype::F16), "the preset default is untouched");
         assert_eq!(run.mamba_dtype, None);
+    }
+
+    /// `train` takes the vocabulary from the shards, so a preset narrowed to
+    /// [`config::SMALL_VOCAB`] against a corpus fitted at the old 32768 default
+    /// is not a mismatch the trainer refuses — it is a wide model built
+    /// silently, which is exactly what issue #23 asked to stop paying for. The
+    /// default that produces the shards has to move with the presets.
+    #[test]
+    fn fitting_a_tokenizer_produces_the_vocabulary_the_presets_are_shaped_for() {
+        let cli = Cli::try_parse_from(["quasar", "tokenizer", "corpus.jsonl"]).unwrap();
+        let Command::Tokenizer { vocab_size, .. } = cli.command else { panic!("not tokenizer") };
+
+        assert_eq!(vocab_size, config::SMALL_VOCAB);
+        assert_eq!(Preset::Tiny.config().vocab_size, vocab_size);
+        assert_eq!(Preset::TinyTurbo.config().vocab_size, vocab_size);
+        // `base` is the one preset still worth 32768, and it has to say so.
+        assert_eq!(Preset::Base.config().vocab_size, 32_768);
     }
 
     #[test]

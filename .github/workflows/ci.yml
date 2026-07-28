@@ -173,6 +173,46 @@ jobs:
           name: performance-diagnostics
           path: benchmark-logs/
 
+  # Issue #23: the reported recipe, past the steps it reported failing at, in
+  # every precision the card can run. A unit test can show the guard rejects a
+  # gradient it was handed; only this can show whether the recipe still produces
+  # one, and which precision it belongs to. It is deliberately independent of
+  # `gpu-benchmark`: throughput and convergence fail for different reasons, and
+  # a job that answers both answers neither when it goes red.
+  stability:
+    runs-on: self-hosted
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          mkdir -p benchmark-logs/stability
+          {
+            git rev-parse HEAD
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram
+          } 2>&1 | tee benchmark-logs/stability/environment.log
+      # `STABILITY_ACCUM` is the only departure from the reported command, and
+      # `examples/stability.sh` says why: four verbatim arms are over an hour on
+      # the one card the whole self-hosted half of CI shares, and a quarter of
+      # the accumulation at the same rate is four times the gradient noise,
+      # which is the harder test rather than the softer one. The micro-batch,
+      # and therefore the VRAM shape, is the reported one.
+      - name: The issue #23 recipe in fp32, fp16 and bf16
+        env:
+          STABILITY_ACCUM: "8"
+        run: BACKEND=vulkan examples/stability.sh
+      - name: Preserve the four arms
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability
+          path: |
+            benchmark-logs/stability/*.log
+            benchmark-logs/stability/*.result
+
   # P7 bypasses CubeCL's AMD matmul compiler and measures the vendor library
   # directly on the same forward/backward projection triplet as the Vulkan
   # reference. It remains isolated until both precision and speed gates pass.

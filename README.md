@@ -151,6 +151,20 @@ examples/smoke.sh
 Fits a tokenizer, shards a synthetic corpus, trains 50 steps, evaluates and
 samples — the whole pipeline in under a minute on a CPU.
 
+## Checking that a recipe trains
+
+```sh
+BACKEND=vulkan examples/stability.sh
+```
+
+The recipe of issue #23 — `tiny-turbo` at micro-batch 4 — past the steps it
+reported coming apart at, in fp32, fp16 on the head, fp16 everywhere and bf16
+everywhere. Each arm has to finish with a loss below the uniform baseline, so an
+arm that survives by learning nothing fails too. A unit test can show the
+trainer rejects a non-finite gradient it is handed; only the card can show
+whether a recipe produces one, which is why this runs on the self-hosted runner
+as the `stability` job.
+
 ## Factorio blueprints
 
 [`factorio/`](factorio/README.md) is a harness that trains `factorio-nano` to build

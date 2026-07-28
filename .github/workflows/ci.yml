@@ -172,6 +172,36 @@ jobs:
           name: performance-diagnostics
           path: benchmark-logs/
 
+  # P7 bypasses CubeCL's AMD matmul compiler and measures the vendor library
+  # directly on the same forward/backward projection triplet as the Vulkan
+  # reference. It remains isolated until both precision and speed gates pass.
+  backend-spike:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record hipBLASLt runtime
+        run: |
+          mkdir -p benchmark-logs
+          {
+            git rev-parse HEAD
+            hipcc --version
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram
+            test -f /opt/rocm/include/hipblaslt/hipblaslt.h
+            ldconfig -p | grep hipblaslt
+          } 2>&1 | tee benchmark-logs/hipblaslt-environment.log
+      - name: P7 — Vulkan vs direct hipBLASLt linear forward/backward
+        run: examples/hipblaslt_ab.sh
+      - name: Preserve backend-spike diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-spike-diagnostics
+          path: benchmark-logs/
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

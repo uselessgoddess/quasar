@@ -34,6 +34,7 @@ backend-metal = ["burn/metal", "burn/std", "cubecl", "_dev-test"]
 backend-vulkan = ["burn/vulkan", "burn/std", "cubecl", "_dev-test"]
 backend-cuda = ["burn/cuda", "burn/std", "cubecl", "_dev-test"]
 backend-rocm = ["burn/rocm", "burn/std", "cubecl", "_dev-test"]
+backend-rocm-rocwmma = ["backend-rocm", "cubecl/hip-rocwmma"]
 backend-remote = ["burn/remote", "burn/std", "cubecl", "_dev-test"]
 # misc features for tests or examples
 # `_dev-test` (internal): enabled by every `backend-*` so the tensor test suite

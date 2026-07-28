@@ -172,6 +172,35 @@ jobs:
           name: performance-diagnostics
           path: benchmark-logs/
 
+  # P6 is deliberately isolated from the production benchmark: it compiles
+  # the same one-layer probe twice so backend and WMMA compiler are the only
+  # variables.  It is a go/no-go experiment, not a production backend switch.
+  backend-spike:
+    runs-on: self-hosted
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record ROCm runtime
+        run: |
+          mkdir -p benchmark-logs
+          {
+            git rev-parse HEAD
+            hipcc --version
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram
+            test -d /opt/rocm/include/rocwmma
+          } 2>&1 | tee benchmark-logs/rocm-environment.log
+      - name: P6 — Vulkan vs ROCm rocWMMA linear forward/backward
+        run: examples/rocm_rocwmma_ab.sh
+      - name: Preserve backend-spike diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-spike-diagnostics
+          path: benchmark-logs/
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

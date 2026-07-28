@@ -236,6 +236,8 @@ jobs:
           cargo fmt --package quasar --check
           cargo clippy --tests --no-default-features --features hipblaslt
       - name: P8 — native tied-head forward and gradient regression
+        env:
+          RUST_BACKTRACE: full
         run: >-
           cargo test --release --no-default-features --features hipblaslt
           native_tied_head_matches_rocm_forward_and_both_gradients -- --nocapture

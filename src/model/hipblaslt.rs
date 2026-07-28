@@ -396,14 +396,24 @@ mod tests {
 
         let reference_output =
             reference_hidden.clone().matmul(reference_weight.clone().transpose().unsqueeze());
+        eprintln!("hipBLASLt regression: materializing reference ROCm matmul");
+        let _ = reference_output.clone().into_data();
+        eprintln!("hipBLASLt regression: reference ROCm matmul complete");
         let native_output = tied_head(native_hidden.clone(), native_weight.clone());
+        eprintln!("hipBLASLt regression: materializing native forward");
+        let _ = native_output.clone().into_data();
+        eprintln!("hipBLASLt regression: native forward complete");
+        eprintln!("hipBLASLt regression: comparing forward outputs");
         let output_error = (reference_output.clone().cast(FloatDType::F32)
             - native_output.clone().cast(FloatDType::F32))
         .abs()
         .max()
         .into_scalar::<f32>();
+        eprintln!("hipBLASLt regression: forward output comparison complete");
 
+        eprintln!("hipBLASLt regression: running reference backward");
         let reference_grads = reference_output.powi_scalar(2).mean().mul_scalar(1024.0).backward();
+        eprintln!("hipBLASLt regression: running native backward");
         let native_grads = native_output.powi_scalar(2).mean().mul_scalar(1024.0).backward();
         let reference_hidden_grad = reference_hidden
             .grad(&reference_grads)

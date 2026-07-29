@@ -489,6 +489,73 @@ fn fused_single_scan_long_decay_matches_serial_and_stays_finite() {
     }
 }
 
+/// Issue #23: the same recipe stops training around step 70, from a loss that
+/// is still finite.
+///
+/// `random_input` draws `da` around −0.5, which is the decay of a *freshly
+/// initialised* model. `da = Δ·A` is learned, and a model that has taken
+/// seventy optimizer steps is well past one unit per token. The reverse
+/// reconstruction divides by `exp(da)` once per token, so the fp32 rounding
+/// error of the closing checkpoint is multiplied by `exp(|da|)` per token and
+/// by `exp(8|da|)` across a reconstruction block: 1e-7 at |da| = 0.5, 1e-2 at
+/// |da| = 2, 8e5 at |da| = 4 and infinite by |da| = 16.
+/// `experiments/inverse_decay.rs` is that table on its own.
+#[cfg(not(feature = "backend-cpu"))]
+#[test]
+fn fused_single_scan_survives_the_decay_a_trained_model_reaches() {
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 4, 8, 1, 2, 4, 4);
+    let device: Device = Default::default();
+    let (v, b, c, _, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    // Two to four units of log-decay per token: strong enough to matter, far
+    // short of the `dt_limit` a Mamba-3 head is actually allowed to reach.
+    let da = Tensor::<4>::random(
+        [batch, nchunks, chunk_len, nheads],
+        Distribution::Uniform(-4.0, -2.0),
+        &device,
+    );
+    let reference_inputs = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let scan_inputs = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+    let y_head = Tensor::<6>::ones(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        &device,
+    );
+    let s_head = Tensor::<4>::ones([batch, nheads, per_head_dim, state_rank], &device);
+    let reference = run_path(
+        Mamba3SsdPath::Serial(Some(chunk_len)),
+        &reference_inputs,
+        y_head.clone(),
+        s_head.clone(),
+    );
+    let run = run_single_scan(&scan_inputs, y_head, s_head, false);
+
+    assert_path_runs_agree(
+        "Serial vs strongly decayed fused single scan",
+        &reference,
+        &run,
+        1e-4,
+        1e-3,
+    );
+}
+
 #[cfg(feature = "backend-cpu")]
 #[test]
 fn fused_single_scan_cube_matches_primitive_values_and_gradients() {
@@ -530,6 +597,59 @@ fn fused_single_scan_cube_matches_primitive_values_and_gradients() {
     let scan = run_single_scan(&scan_inputs, y_head, s_head, false);
     assert_path_runs_agree(
         "Primitive vs Cube single scan",
+        &reference,
+        &scan,
+        1e-4,
+        1e-3,
+    );
+}
+
+/// The kernel counterpart of
+/// `fused_single_scan_survives_the_decay_a_trained_model_reaches`.
+///
+/// Nine tokens cross one full reconstruction block and one partial one, so the
+/// checkpoint indexing the block replay depends on is exercised on both.
+#[cfg(feature = "backend-cpu")]
+#[test]
+fn fused_single_scan_cube_survives_the_decay_a_trained_model_reaches() {
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 3, 3, 1, 1, 2, 2);
+    let device: Device = Default::default();
+    let (v, b, c, _, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    let da = Tensor::<4>::random(
+        [batch, nchunks, chunk_len, nheads],
+        Distribution::Uniform(-4.0, -2.0),
+        &device,
+    );
+    let y_head = Tensor::<6>::ones(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        &device,
+    );
+    let s_head = Tensor::<4>::ones([batch, nheads, per_head_dim, state_rank], &device);
+    let reference_inputs = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let scan_inputs = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+    let reference = run_single_scan(&reference_inputs, y_head.clone(), s_head.clone(), true);
+    let scan = run_single_scan(&scan_inputs, y_head, s_head, false);
+    assert_path_runs_agree(
+        "Primitive vs strongly decayed Cube single scan",
         &reference,
         &scan,
         1e-4,

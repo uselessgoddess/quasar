@@ -17,7 +17,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,6 +31,13 @@ jobs:
       # The default backend is CPU, so the whole suite -- real forward and
       # backward passes included -- runs on a hosted runner.
       - run: cargo test --all-targets
+      # The subtree is excluded from the workspace, so the line above never
+      # reaches it, and the fused SSD scan quasar trains through carries a custom
+      # backward nothing else checks -- issue #23 was a numerical bug in exactly
+      # that. Share the cached target directory rather than build a second one.
+      - run: cargo test --manifest-path vendor/burn-mamba/Cargo.toml --lib
+        env:
+          CARGO_TARGET_DIR: target
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 

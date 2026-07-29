@@ -173,11 +173,6 @@ There is one card behind that runner, so `stability`, `gpu-benchmark` and
 `gh workflow run ci.yml --ref <branch>`, when somebody is actually asking for
 the number.
 
-There is one card behind that runner, so `stability`, `gpu-benchmark` and
-`backend-spike` do not run per commit: they run on push to `main` and on
-`gh workflow run ci.yml --ref <branch>`, when somebody is actually asking for
-the number.
-
 ## Factorio blueprints
 
 [`factorio/`](factorio/README.md) is a harness that trains `factorio-nano` to build

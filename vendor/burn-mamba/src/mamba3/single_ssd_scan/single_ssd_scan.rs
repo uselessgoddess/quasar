@@ -20,7 +20,7 @@ fn single_ssd_scan_forward<B: Backend>(
     let [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim] = v_bnl1hp.dims();
     let [.., state_rank] = b_bnl1hr.dims();
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let block_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
     assert_eq!(mimo_rank, 1, "fused single-SSD scan requires MIMO rank one");
     assert!(
         tokens > 0,
@@ -46,7 +46,10 @@ fn single_ssd_scan_forward<B: Backend>(
     let scale_bth = scale_bnlh.reshape([batch, tokens, nheads]);
     let mut state_bhpr = initial_bhpr;
     let mut outputs = Vec::with_capacity(tokens);
-    let mut checkpoints = Vec::with_capacity(checkpoint_count);
+    // Checkpoint `c` opens block `c`; the backward replays the recurrence
+    // forward from it rather than dividing the decay back out.
+    let mut checkpoints = Vec::with_capacity(block_count + 1);
+    checkpoints.push(state_bhpr.clone());
 
     for token in 0..tokens {
         let v_bhp = v_bthp.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
@@ -88,7 +91,7 @@ fn single_ssd_scan_forward<B: Backend>(
             checkpoints_bhnpr.reshape([
                 batch,
                 nheads,
-                checkpoint_count * per_head_dim * state_rank,
+                (block_count + 1) * per_head_dim * state_rank,
             ]),
         ],
         2,
@@ -117,26 +120,34 @@ fn single_ssd_scan_backward<B: Backend>(
     let [batch, nchunks, chunk_len, _, nheads, per_head_dim] = v_bnl1hp.dims();
     let [.., state_rank] = b_bnl1hr.dims();
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let block_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
     let v_bthp = v_bnl1hp.reshape([batch, tokens, nheads, per_head_dim]);
     let b_bthr = b_bnl1hr.reshape([batch, tokens, nheads, state_rank]);
     let c_bthr = c_bnl1hr.reshape([batch, tokens, nheads, state_rank]);
     let da_bth = da_bnlh.reshape([batch, tokens, nheads]);
     let gamma_bth = gamma_bnlh.reshape([batch, tokens, nheads]);
     let scale_bth = scale_bnlh.reshape([batch, tokens, nheads]);
+    let v_at = |token| v_bthp.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+    let b_at = |token| b_bthr.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+    let c_at = |token| c_bthr.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+    let da_at = |token| da_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
+    let gamma_at = |token| gamma_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
+    let scale_at = |token| scale_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
     let d_y_bhpt = d_packed_bh_tnpr
         .clone()
         .narrow(2, 0, tokens * per_head_dim)
         .reshape([batch, nheads, tokens, per_head_dim])
         .permute([0, 1, 3, 2]);
-    let final_checkpoint_offset =
-        tokens * per_head_dim + (checkpoint_count - 1) * per_head_dim * state_rank;
-    let mut state_post_bhpr = packed_bh_tnpr
-        .clone()
-        .narrow(2, final_checkpoint_offset, per_head_dim * state_rank)
-        .reshape([batch, nheads, per_head_dim, state_rank]);
+    let checkpoint_offset = |slot: usize| tokens * per_head_dim + slot * per_head_dim * state_rank;
+    let checkpoint = |slot: usize| {
+        packed_bh_tnpr
+            .clone()
+            .narrow(2, checkpoint_offset(slot), per_head_dim * state_rank)
+            .reshape([batch, nheads, per_head_dim, state_rank])
+    };
+    // The last checkpoint is the final state, so its cotangent opens the walk.
     let mut g_post_bhpr = d_packed_bh_tnpr
-        .narrow(2, final_checkpoint_offset, per_head_dim * state_rank)
+        .narrow(2, checkpoint_offset(block_count), per_head_dim * state_rank)
         .reshape([batch, nheads, per_head_dim, state_rank]);
     let mut d_v_rev = Vec::with_capacity(tokens);
     let mut d_b_rev = Vec::with_capacity(tokens);
@@ -145,81 +156,84 @@ fn single_ssd_scan_backward<B: Backend>(
     let mut d_gamma_rev = Vec::with_capacity(tokens);
     let mut d_scale_rev = Vec::with_capacity(tokens);
 
-    for token in (0..tokens).rev() {
-        if (token + 1).is_multiple_of(RECONSTRUCTION_INTERVAL) || token + 1 == tokens {
-            let checkpoint = token / RECONSTRUCTION_INTERVAL;
-            state_post_bhpr = packed_bh_tnpr
-                .clone()
-                .narrow(
-                    2,
-                    tokens * per_head_dim + checkpoint * per_head_dim * state_rank,
-                    per_head_dim * state_rank,
-                )
-                .reshape([batch, nheads, per_head_dim, state_rank]);
+    for block in (0..block_count).rev() {
+        let start = block * RECONSTRUCTION_INTERVAL;
+        let end = (start + RECONSTRUCTION_INTERVAL).min(tokens);
+        // Replay the block forward from the state it opened with. Dividing the
+        // decay back out on the way down is cheaper and, for the `da` a trained
+        // model reaches, wrong -- see the module documentation.
+        let mut states = Vec::with_capacity(end - start);
+        let mut state_bhpr = checkpoint(block);
+        for token in start..end {
+            states.push(state_bhpr.clone());
+            let injection_bhpr = v_at(token).unsqueeze_dim::<4>(3) * b_at(token).unsqueeze_dim(2);
+            state_bhpr = da_at(token).exp().unsqueeze_dims::<4>(&[2, 3]) * state_bhpr
+                + scale_at(token).unsqueeze_dims::<4>(&[2, 3]) * injection_bhpr;
         }
-        let v_bhp = v_bthp.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
-        let b_bhr = b_bthr.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
-        let c_bhr = c_bthr.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
-        let da_bh = da_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
-        let gamma_bh = gamma_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
-        let scale_bh = scale_bth.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
-        let dy_bhp = d_y_bhpt.clone().narrow(3, token, 1).squeeze_dim::<3>(3);
-        let v_bhp1 = v_bhp.clone().unsqueeze_dim::<4>(3);
-        let b_bh1r = b_bhr.clone().unsqueeze_dim::<4>(2);
-        let c_bh1r = c_bhr.clone().unsqueeze_dim::<4>(2);
-        let injection_bhpr = v_bhp1.clone() * b_bh1r.clone();
-        let scale_bh11 = scale_bh.clone().unsqueeze_dims::<4>(&[2, 3]);
-        let gamma_bh11 = gamma_bh.clone().unsqueeze_dims::<4>(&[2, 3]);
-        let state_pre_bhpr = state_post_bhpr - scale_bh11 * injection_bhpr.clone();
-        let g_pre_bhpr =
-            g_post_bhpr.clone() + dy_bhp.clone().unsqueeze_dim::<4>(3) * c_bh1r.clone();
 
-        let dy_v_bh = (dy_bhp.clone() * v_bhp.clone())
-            .sum_dim(2)
-            .squeeze_dim::<2>(2);
-        let cb_bh = (c_bhr.clone() * b_bhr.clone())
-            .sum_dim(2)
-            .squeeze_dim::<2>(2);
-        let d_v_bhp = scale_bh.clone().unsqueeze_dim::<3>(2)
-            * (g_post_bhpr.clone() * b_bh1r.clone())
-                .sum_dim(3)
-                .squeeze_dim::<3>(3)
-            + gamma_bh.clone().unsqueeze_dim::<3>(2)
-                * dy_bhp.clone()
-                * cb_bh.clone().unsqueeze_dim::<3>(2);
-        let d_b_bhr = scale_bh.clone().unsqueeze_dim::<3>(2)
-            * (g_post_bhpr.clone() * v_bhp1.clone())
+        for token in (start..end).rev() {
+            let v_bhp = v_at(token);
+            let b_bhr = b_at(token);
+            let c_bhr = c_at(token);
+            let da_bh = da_at(token);
+            let gamma_bh = gamma_at(token);
+            let scale_bh = scale_at(token);
+            let dy_bhp = d_y_bhpt.clone().narrow(3, token, 1).squeeze_dim::<3>(3);
+            let v_bhp1 = v_bhp.clone().unsqueeze_dim::<4>(3);
+            let b_bh1r = b_bhr.clone().unsqueeze_dim::<4>(2);
+            let c_bh1r = c_bhr.clone().unsqueeze_dim::<4>(2);
+            let injection_bhpr = v_bhp1.clone() * b_bh1r.clone();
+            let gamma_bh11 = gamma_bh.clone().unsqueeze_dims::<4>(&[2, 3]);
+            let decay_bh11 = da_bh.exp().unsqueeze_dims::<4>(&[2, 3]);
+            let state_pre_bhpr = decay_bh11.clone() * states[token - start].clone();
+            let g_pre_bhpr =
+                g_post_bhpr.clone() + dy_bhp.clone().unsqueeze_dim::<4>(3) * c_bh1r.clone();
+
+            let dy_v_bh = (dy_bhp.clone() * v_bhp.clone())
                 .sum_dim(2)
-                .squeeze_dim::<3>(2)
-            + gamma_bh.clone().unsqueeze_dim::<3>(2)
-                * c_bhr.clone()
-                * dy_v_bh.clone().unsqueeze_dim::<3>(2);
-        let d_c_bhr = (dy_bhp.clone().unsqueeze_dim::<4>(3)
-            * (state_pre_bhpr.clone() + gamma_bh11 * injection_bhpr.clone()))
-        .sum_dim(2)
-        .squeeze_dim::<3>(2);
-        let d_scale_bh = (g_post_bhpr.clone() * injection_bhpr.clone())
-            .sum_dim(3)
+                .squeeze_dim::<2>(2);
+            let cb_bh = (c_bhr.clone() * b_bhr.clone())
+                .sum_dim(2)
+                .squeeze_dim::<2>(2);
+            let d_v_bhp = scale_bh.clone().unsqueeze_dim::<3>(2)
+                * (g_post_bhpr.clone() * b_bh1r.clone())
+                    .sum_dim(3)
+                    .squeeze_dim::<3>(3)
+                + gamma_bh.clone().unsqueeze_dim::<3>(2)
+                    * dy_bhp.clone()
+                    * cb_bh.clone().unsqueeze_dim::<3>(2);
+            let d_b_bhr = scale_bh.clone().unsqueeze_dim::<3>(2)
+                * (g_post_bhpr.clone() * v_bhp1.clone())
+                    .sum_dim(2)
+                    .squeeze_dim::<3>(2)
+                + gamma_bh.clone().unsqueeze_dim::<3>(2)
+                    * c_bhr.clone()
+                    * dy_v_bh.clone().unsqueeze_dim::<3>(2);
+            let d_c_bhr = (dy_bhp.clone().unsqueeze_dim::<4>(3)
+                * (state_pre_bhpr.clone() + gamma_bh11 * injection_bhpr.clone()))
             .sum_dim(2)
-            .squeeze_dim::<3>(3)
-            .squeeze_dim::<2>(2);
-        let d_gamma_bh = dy_v_bh * cb_bh;
-        let d_da_bh = (g_pre_bhpr.clone() * state_pre_bhpr.clone())
-            .sum_dim(3)
-            .sum_dim(2)
-            .squeeze_dim::<3>(3)
-            .squeeze_dim::<2>(2);
+            .squeeze_dim::<3>(2);
+            let d_scale_bh = (g_post_bhpr.clone() * injection_bhpr.clone())
+                .sum_dim(3)
+                .sum_dim(2)
+                .squeeze_dim::<3>(3)
+                .squeeze_dim::<2>(2);
+            let d_gamma_bh = dy_v_bh * cb_bh;
+            let d_da_bh = (g_pre_bhpr.clone() * state_pre_bhpr)
+                .sum_dim(3)
+                .sum_dim(2)
+                .squeeze_dim::<3>(3)
+                .squeeze_dim::<2>(2);
 
-        d_v_rev.push(d_v_bhp);
-        d_b_rev.push(d_b_bhr);
-        d_c_rev.push(d_c_bhr);
-        d_da_rev.push(d_da_bh);
-        d_gamma_rev.push(d_gamma_bh);
-        d_scale_rev.push(d_scale_bh);
+            d_v_rev.push(d_v_bhp);
+            d_b_rev.push(d_b_bhr);
+            d_c_rev.push(d_c_bhr);
+            d_da_rev.push(d_da_bh);
+            d_gamma_rev.push(d_gamma_bh);
+            d_scale_rev.push(d_scale_bh);
 
-        let decay_bh11 = da_bh.clone().exp().unsqueeze_dims::<4>(&[2, 3]);
-        state_post_bhpr = (-da_bh).exp().unsqueeze_dims::<4>(&[2, 3]) * state_pre_bhpr;
-        g_post_bhpr = decay_bh11 * g_pre_bhpr;
+            g_post_bhpr = decay_bh11 * g_pre_bhpr;
+        }
     }
 
     d_v_rev.reverse();
@@ -343,7 +357,7 @@ pub fn single_ssd_scan(
     let [.., state_rank] = b_bnl1hr.dims();
     assert_eq!(mimo_rank, 1, "fused single-SSD scan requires MIMO rank one");
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let block_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
     let packed = Tensor::<3>::from_dispatch(
         <Dispatch as Mamba3SingleSsdScanBackendExt>::mamba3_single_ssd_scan(
             v_bnl1hp.into_dispatch(),
@@ -364,7 +378,7 @@ pub fn single_ssd_scan(
     let final_state = packed
         .narrow(
             2,
-            tokens * per_head_dim + (checkpoint_count - 1) * per_head_dim * state_rank,
+            tokens * per_head_dim + block_count * per_head_dim * state_rank,
             per_head_dim * state_rank,
         )
         .reshape([batch, nheads, per_head_dim, state_rank]);
@@ -386,7 +400,7 @@ pub(crate) fn single_ssd_scan_reference(
     let [batch, nchunks, chunk_len, _, nheads, per_head_dim] = v_bnl1hp.dims();
     let state_rank = b_bnl1hr.dims()[5];
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let block_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
     let packed = Tensor::<3>::from_dispatch(
         single_ssd_scan_forward::<Dispatch>(
             F::new(v_bnl1hp.into_dispatch()),
@@ -408,7 +422,7 @@ pub(crate) fn single_ssd_scan_reference(
     let final_state = packed
         .narrow(
             2,
-            tokens * per_head_dim + (checkpoint_count - 1) * per_head_dim * state_rank,
+            tokens * per_head_dim + block_count * per_head_dim * state_rank,
             per_head_dim * state_rank,
         )
         .reshape([batch, nheads, per_head_dim, state_rank]);

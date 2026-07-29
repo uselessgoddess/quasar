@@ -29,7 +29,7 @@ fn single_ssd_scan_forward_kernel<F: Float>(
     let nchunks = v.shape(1);
     let chunk_len = v.shape(2);
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL) + 1;
     let nheads = v.shape(4);
     let per_head_dim = v.shape(5);
     let scans = batch * nheads * per_head_dim;
@@ -41,10 +41,15 @@ fn single_ssd_scan_forward_kernel<F: Float>(
     let bh = scan_pos / per_head_dim;
     let head = bh % nheads;
     let batch_pos = bh / nheads;
+    let packed_base =
+        (batch_pos * nheads + head) * (per_head_dim * (tokens + checkpoint_count * state_rank));
+    let checkpoint_base = packed_base + tokens * per_head_dim + p * state_rank;
     let mut state = Array::<F>::new(state_rank);
     for r in 0..state_rank {
         let state_pos = ((batch_pos * nheads + head) * per_head_dim + p) * state_rank + r;
         state[r] = initial[state_pos];
+        // Checkpoint zero is the state the first reconstruction block opens with.
+        packed[checkpoint_base + r] = state[r];
     }
 
     let mut token = 0usize;
@@ -63,28 +68,22 @@ fn single_ssd_scan_forward_kernel<F: Float>(
             y += c[bc_pos] * (pre + gamma_value * key * value);
             state[r] = pre + scale_value * key * value;
         }
-        let packed_pos = (batch_pos * nheads + head)
-            * (per_head_dim * (tokens + checkpoint_count * state_rank))
-            + token * per_head_dim
-            + p;
-        packed[packed_pos] = y;
+        packed[packed_base + token * per_head_dim + p] = y;
         if (token + 1) % RECONSTRUCTION_INTERVAL == 0 || token + 1 == tokens {
-            let checkpoint = token / RECONSTRUCTION_INTERVAL;
+            // Opens the next block, and for the last token is the final state.
+            let checkpoint = (token + 1).div_ceil(RECONSTRUCTION_INTERVAL);
             for r in 0..state_rank {
-                let checkpoint_pos = (batch_pos * nheads + head)
-                    * (per_head_dim * (tokens + checkpoint_count * state_rank))
-                    + tokens * per_head_dim
-                    + checkpoint * per_head_dim * state_rank
-                    + p * state_rank
-                    + r;
-                packed[checkpoint_pos] = state[r];
+                packed[checkpoint_base + checkpoint * per_head_dim * state_rank + r] = state[r];
             }
         }
         token += 1;
     }
 }
 
-/// Per-value stream: reconstructs the state and emits the unique dV/dInitial entries.
+/// Per-value stream: emits the unique dV/dInitial entries.
+///
+/// Both depend on the cotangent alone, never on the state the forward pass
+/// visited, so this stream needs no reconstruction at all.
 #[cube(launch)]
 fn single_ssd_scan_backward_value_kernel<F: Float>(
     v: &Tensor<F>,
@@ -93,7 +92,6 @@ fn single_ssd_scan_backward_value_kernel<F: Float>(
     c: &Tensor<F>,
     gamma: &Tensor<F>,
     scale: &Tensor<F>,
-    packed: &Tensor<F>,
     d_packed: &Tensor<F>,
     d_v: &mut Tensor<F>,
     d_initial: &mut Tensor<F>,
@@ -105,7 +103,7 @@ fn single_ssd_scan_backward_value_kernel<F: Float>(
     let nchunks = v.shape(1);
     let chunk_len = v.shape(2);
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL) + 1;
     let nheads = v.shape(4);
     let per_head_dim = v.shape(5);
     let scans = batch * nheads * per_head_dim;
@@ -119,7 +117,6 @@ fn single_ssd_scan_backward_value_kernel<F: Float>(
     let batch_pos = bh / nheads;
     let packed_base =
         (batch_pos * nheads + head) * (per_head_dim * (tokens + checkpoint_count * state_rank));
-    let mut state_post = Array::<F>::new(state_rank);
     let mut g_post = Array::<F>::new(state_rank);
     for r in 0..state_rank {
         let state_pos = packed_base
@@ -127,39 +124,22 @@ fn single_ssd_scan_backward_value_kernel<F: Float>(
             + (checkpoint_count - 1) * per_head_dim * state_rank
             + p * state_rank
             + r;
-        state_post[r] = packed[state_pos];
         g_post[r] = d_packed[state_pos];
     }
 
     let mut remaining = tokens;
     while remaining > 0 {
         let token = remaining - 1;
-        if (token + 1) % RECONSTRUCTION_INTERVAL == 0 || token + 1 == tokens {
-            let checkpoint = token / RECONSTRUCTION_INTERVAL;
-            for r in 0..state_rank {
-                let state_pos = packed_base
-                    + tokens * per_head_dim
-                    + checkpoint * per_head_dim * state_rank
-                    + p * state_rank
-                    + r;
-                state_post[r] = packed[state_pos];
-            }
-        }
         let coef_pos = (batch_pos * tokens + token) * nheads + head;
         let v_pos = ((batch_pos * tokens + token) * nheads + head) * per_head_dim + p;
-        let value = v[v_pos];
         let dy = d_packed[packed_base + token * per_head_dim + p];
         let decay = da[coef_pos].exp();
-        let inverse_decay = (-da[coef_pos]).exp();
         let mut dv = F::new(0.0);
         for r in 0..state_rank {
             let bc_pos = ((batch_pos * tokens + token) * nheads + head) * state_rank + r;
             let key = b[bc_pos];
             dv += scale[coef_pos] * g_post[r] * key + gamma[coef_pos] * dy * c[bc_pos] * key;
-            let pre = state_post[r] - scale[coef_pos] * key * value;
-            let g_pre = g_post[r] + dy * c[bc_pos];
-            state_post[r] = inverse_decay * pre;
-            g_post[r] = decay * g_pre;
+            g_post[r] = decay * (g_post[r] + dy * c[bc_pos]);
         }
         d_v[v_pos] = dv;
         remaining -= 1;
@@ -194,7 +174,8 @@ fn single_ssd_scan_backward_state_kernel<F: Float>(
     let nchunks = v.shape(1);
     let chunk_len = v.shape(2);
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL) + 1;
+    let block_count = checkpoint_count - 1;
     let nheads = v.shape(4);
     let scans = batch * nheads * state_rank;
     if scan_pos >= scans {
@@ -207,66 +188,85 @@ fn single_ssd_scan_backward_state_kernel<F: Float>(
     let batch_pos = bh / nheads;
     let packed_base =
         (batch_pos * nheads + head) * (per_head_dim * (tokens + checkpoint_count * state_rank));
-    let mut state_post = Array::<F>::new(per_head_dim);
+    let checkpoint_base = packed_base + tokens * per_head_dim + r;
+    let mut opening = Array::<F>::new(per_head_dim);
+    let mut state = Array::<F>::new(per_head_dim);
     let mut g_post = Array::<F>::new(per_head_dim);
     for p in 0..per_head_dim {
-        let state_pos = packed_base
-            + tokens * per_head_dim
-            + (checkpoint_count - 1) * per_head_dim * state_rank
-            + p * state_rank
-            + r;
-        state_post[p] = packed[state_pos];
-        g_post[p] = d_packed[state_pos];
+        g_post[p] =
+            d_packed[checkpoint_base + block_count * per_head_dim * state_rank + p * state_rank];
     }
 
-    let mut remaining = tokens;
-    while remaining > 0 {
-        let token = remaining - 1;
-        if (token + 1) % RECONSTRUCTION_INTERVAL == 0 || token + 1 == tokens {
-            let checkpoint = token / RECONSTRUCTION_INTERVAL;
-            for p in 0..per_head_dim {
-                let state_pos = packed_base
-                    + tokens * per_head_dim
-                    + checkpoint * per_head_dim * state_rank
-                    + p * state_rank
-                    + r;
-                state_post[p] = packed[state_pos];
-            }
+    let mut block = block_count;
+    while block > 0 {
+        block -= 1;
+        let start = block * RECONSTRUCTION_INTERVAL;
+        let mut end = start + RECONSTRUCTION_INTERVAL;
+        if end > tokens {
+            end = tokens;
         }
-        let coef_pos = (batch_pos * tokens + token) * nheads + head;
-        let bc_pos = ((batch_pos * tokens + token) * nheads + head) * state_rank + r;
-        let key = b[bc_pos];
-        let query = c[bc_pos];
-        let decay = da[coef_pos].exp();
-        let inverse_decay = (-da[coef_pos]).exp();
-        let mut gp_v = F::new(0.0);
-        let mut dy_v = F::new(0.0);
-        let mut dc = F::new(0.0);
-        let mut dda = F::new(0.0);
-        let mut dscale = F::new(0.0);
-
         for p in 0..per_head_dim {
-            let v_pos = ((batch_pos * tokens + token) * nheads + head) * per_head_dim + p;
-            let value = v[v_pos];
-            let dy = d_packed[packed_base + token * per_head_dim + p];
-            let pre = state_post[p] - scale[coef_pos] * key * value;
-            let g_pre = g_post[p] + dy * query;
-            gp_v += g_post[p] * value;
-            dy_v += dy * value;
-            dc += dy * (pre + gamma[coef_pos] * key * value);
-            dda += g_pre * pre;
-            dscale += g_post[p] * key * value;
-            state_post[p] = inverse_decay * pre;
-            g_post[p] = decay * g_pre;
+            opening[p] =
+                packed[checkpoint_base + block * per_head_dim * state_rank + p * state_rank];
         }
 
-        d_b[bc_pos] = scale[coef_pos] * gp_v + gamma[coef_pos] * query * dy_v;
-        d_c[bc_pos] = dc;
-        let contribution_base = ((batch_pos * tokens + token) * nheads + head) * (3 * state_rank);
-        contributions[contribution_base + r] = dda;
-        contributions[contribution_base + state_rank + r] = query * key * dy_v;
-        contributions[contribution_base + 2 * state_rank + r] = dscale;
-        remaining -= 1;
+        let mut remaining = end;
+        while remaining > start {
+            let token = remaining - 1;
+            // Replay the block forward from the state it opened with. Dividing
+            // the decay back out costs one pass instead of this quadratic one
+            // and, for the `da` a trained model reaches, is wrong -- see the
+            // module documentation.
+            for p in 0..per_head_dim {
+                state[p] = opening[p];
+            }
+            let mut step = start;
+            while step < token {
+                let step_coef = (batch_pos * tokens + step) * nheads + head;
+                let step_decay = da[step_coef].exp();
+                let injection = scale[step_coef]
+                    * b[((batch_pos * tokens + step) * nheads + head) * state_rank + r];
+                for p in 0..per_head_dim {
+                    let step_pos = ((batch_pos * tokens + step) * nheads + head) * per_head_dim + p;
+                    state[p] = step_decay * state[p] + injection * v[step_pos];
+                }
+                step += 1;
+            }
+
+            let coef_pos = (batch_pos * tokens + token) * nheads + head;
+            let bc_pos = ((batch_pos * tokens + token) * nheads + head) * state_rank + r;
+            let key = b[bc_pos];
+            let query = c[bc_pos];
+            let decay = da[coef_pos].exp();
+            let mut gp_v = F::new(0.0);
+            let mut dy_v = F::new(0.0);
+            let mut dc = F::new(0.0);
+            let mut dda = F::new(0.0);
+            let mut dscale = F::new(0.0);
+
+            for p in 0..per_head_dim {
+                let v_pos = ((batch_pos * tokens + token) * nheads + head) * per_head_dim + p;
+                let value = v[v_pos];
+                let dy = d_packed[packed_base + token * per_head_dim + p];
+                let pre = decay * state[p];
+                let g_pre = g_post[p] + dy * query;
+                gp_v += g_post[p] * value;
+                dy_v += dy * value;
+                dc += dy * (pre + gamma[coef_pos] * key * value);
+                dda += g_pre * pre;
+                dscale += g_post[p] * key * value;
+                g_post[p] = decay * g_pre;
+            }
+
+            d_b[bc_pos] = scale[coef_pos] * gp_v + gamma[coef_pos] * query * dy_v;
+            d_c[bc_pos] = dc;
+            let contribution_base =
+                ((batch_pos * tokens + token) * nheads + head) * (3 * state_rank);
+            contributions[contribution_base + r] = dda;
+            contributions[contribution_base + state_rank + r] = query * key * dy_v;
+            contributions[contribution_base + 2 * state_rank + r] = dscale;
+            remaining -= 1;
+        }
     }
 }
 
@@ -341,7 +341,8 @@ fn single_ssd_scan_forward<R: CubeRuntime>(
     let [batch, nchunks, chunk_len, _, nheads, per_head_dim] = v.meta.shape().dims();
     let state_rank = b.meta.shape()[5];
     let tokens = nchunks * chunk_len;
-    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+    // One checkpoint opens each reconstruction block, plus the final state.
+    let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL) + 1;
     let packed = empty(
         &v,
         Shape::new([
@@ -422,7 +423,6 @@ fn single_ssd_scan_backward<R: CubeRuntime>(
         c.clone().into_tensor_arg(),
         gamma.clone().into_tensor_arg(),
         scale.clone().into_tensor_arg(),
-        packed.clone().into_tensor_arg(),
         d_packed.clone().into_tensor_arg(),
         d_v.clone().into_tensor_arg(),
         d_initial.clone().into_tensor_arg(),

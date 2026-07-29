@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use burn::prelude::*;
@@ -56,8 +57,17 @@ enum Command {
     },
     /// Tokenize the corpus into `train/` and `valid/` shards.
     Prepare {
-        #[arg(required = true)]
+        /// Files or directories for an unweighted corpus.
+        #[arg(required_unless_present = "mix", conflicts_with = "mix")]
         corpus: Vec<PathBuf>,
+        /// A relative token share and source path, for example
+        /// `--mix 55:data/dclm --mix 45:data/fineweb`.
+        #[arg(long, value_name = "WEIGHT:PATH", conflicts_with = "corpus", requires = "tokens")]
+        mix: Vec<WeightedPath>,
+        /// Minimum number of training tokens to prepare. Whole documents are
+        /// kept, so the result can exceed this by one document.
+        #[arg(long, requires = "mix")]
+        tokens: Option<u64>,
         #[arg(long, default_value = "data/tokenizer.json")]
         tokenizer: PathBuf,
         #[arg(long, default_value = "data/shards")]
@@ -218,6 +228,39 @@ enum Preset {
     Toy,
 }
 
+/// One `--mix WEIGHT:PATH` argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WeightedPath {
+    weight: u64,
+    path: PathBuf,
+}
+
+impl FromStr for WeightedPath {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (weight, path) = value
+            .split_once(':')
+            .ok_or_else(|| "expected WEIGHT:PATH, for example 55:data/fineweb".to_owned())?;
+        if path.is_empty() {
+            return Err("the path after WEIGHT: is empty".to_owned());
+        }
+        let weight = weight.strip_suffix('%').unwrap_or(weight);
+        let weight: f64 =
+            weight.parse().map_err(|_| format!("`{weight}` is not a relative weight"))?;
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err("a mixture weight must be positive and finite".to_owned());
+        }
+        // Fixed point keeps the scheduler's cross-multiplication deterministic
+        // while accepting convenient decimal shares such as `2.5:math`.
+        let weight = (weight * 1_000_000.0).round();
+        if weight < 1.0 || weight > u64::MAX as f64 {
+            return Err("mixture weight is outside the supported range".to_owned());
+        }
+        Ok(Self { weight: weight as u64, path: PathBuf::from(path) })
+    }
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Budget { preset, micro_batch, shape } => {
@@ -226,13 +269,8 @@ fn main() -> Result<()> {
         Command::Tokenizer { corpus, out, vocab_size, docs, field } => {
             tokenizer(&corpus, &out, vocab_size, docs, &field)
         }
-        Command::Prepare { corpus, tokenizer, out, field } => {
-            let corpus = Corpus::open(&corpus, &field)?;
-            let tokenizer = Tokenizer::load(&tokenizer)?;
-            let prepared = prepare::run(&corpus, &tokenizer, &out)?;
-            println!("train {} tokens", prepared.train.tokens);
-            println!("valid {} tokens", prepared.valid.tokens);
-            Ok(())
+        Command::Prepare { corpus, mix, tokens, tokenizer, out, field } => {
+            prepare_corpus(&corpus, &mix, tokens, &tokenizer, &out, &field)
         }
         Command::Train { preset, data, out, run, shape } => {
             // The tokenizer decides the vocabulary, not the preset: a corpus
@@ -264,6 +302,98 @@ fn main() -> Result<()> {
             sample(&run, &tokenizer, &asked, out.as_deref(), &sampler)
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct MixReceipt<'a> {
+    requested_train_tokens: u64,
+    prepared_train_tokens: u64,
+    prepared_valid_tokens: u64,
+    sources: Vec<MixReceiptSource<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct MixReceiptSource<'a> {
+    path: &'a Path,
+    requested_percent: f64,
+    actual_train_percent: f64,
+    train_tokens: u64,
+    train_docs: u64,
+    train_bytes: u64,
+    valid_tokens: u64,
+    valid_docs: u64,
+    valid_bytes: u64,
+}
+
+fn prepare_corpus(
+    corpus: &[PathBuf],
+    mixture: &[WeightedPath],
+    tokens: Option<u64>,
+    tokenizer: &Path,
+    out: &Path,
+    field: &str,
+) -> Result<()> {
+    let tokenizer = Tokenizer::load(tokenizer)?;
+    if mixture.is_empty() {
+        let corpus = Corpus::open(corpus, field)?;
+        let prepared = prepare::run(&corpus, &tokenizer, out)?;
+        println!("train {} tokens", prepared.train.tokens);
+        println!("valid {} tokens", prepared.valid.tokens);
+        return Ok(());
+    }
+
+    let requested = tokens.context("--tokens is required with --mix")?;
+    if requested == 0 {
+        anyhow::bail!("--tokens must be positive");
+    }
+    let corpora: Vec<_> = mixture
+        .iter()
+        .map(|source| Corpus::open(std::slice::from_ref(&source.path), field))
+        .collect::<std::result::Result<_, _>>()?;
+    let sources: Vec<_> = mixture
+        .iter()
+        .zip(&corpora)
+        .map(|(source, corpus)| prepare::MixSource { corpus, weight: source.weight })
+        .collect();
+    let prepared = prepare::mix(&sources, &tokenizer, out, requested)?;
+
+    let weight_total: u128 = mixture.iter().map(|source| source.weight as u128).sum();
+    let receipt = MixReceipt {
+        requested_train_tokens: requested,
+        prepared_train_tokens: prepared.train.tokens,
+        prepared_valid_tokens: prepared.valid.tokens,
+        sources: mixture
+            .iter()
+            .zip(&prepared.sources)
+            .map(|(source, actual)| MixReceiptSource {
+                path: &source.path,
+                requested_percent: source.weight as f64 / weight_total as f64 * 100.0,
+                actual_train_percent: actual.train_tokens as f64 / prepared.train.tokens as f64
+                    * 100.0,
+                train_tokens: actual.train_tokens,
+                train_docs: actual.train_docs,
+                train_bytes: actual.train_bytes,
+                valid_tokens: actual.valid_tokens,
+                valid_docs: actual.valid_docs,
+                valid_bytes: actual.valid_bytes,
+            })
+            .collect(),
+    };
+    fs::write(out.join("mix.json"), serde_json::to_string_pretty(&receipt)?)
+        .with_context(|| format!("cannot write {}", out.join("mix.json").display()))?;
+
+    println!("train {} tokens", prepared.train.tokens);
+    println!("valid {} tokens", prepared.valid.tokens);
+    for source in &receipt.sources {
+        println!(
+            "  {:6.2}% train | {:6.2}% requested | {}",
+            source.actual_train_percent,
+            source.requested_percent,
+            source.path.display()
+        );
+    }
+    println!("{}", out.join("mix.json").display());
+    Ok(())
 }
 
 /// What a preset costs, in the currencies that decide whether it fits.
@@ -610,6 +740,49 @@ impl Overrides {
 mod tests {
     use super::*;
 
+    /// Issue #25: source weights are part of `prepare`, not an external script
+    /// whose rounding and unit (bytes, documents, or tokens) the run cannot
+    /// recover later.
+    #[test]
+    fn prepare_accepts_relative_token_mixtures() {
+        let cli = Cli::try_parse_from([
+            "quasar",
+            "prepare",
+            "--mix",
+            "55:data/dclm",
+            "--mix",
+            "2.5%:data/math",
+            "--tokens",
+            "1468006400",
+        ])
+        .unwrap();
+
+        let Command::Prepare { corpus, mix, tokens, .. } = cli.command else {
+            panic!("not prepare")
+        };
+        assert!(corpus.is_empty());
+        assert_eq!(tokens, Some(1_468_006_400));
+        assert_eq!(
+            mix,
+            [
+                WeightedPath { weight: 55_000_000, path: "data/dclm".into() },
+                WeightedPath { weight: 2_500_000, path: "data/math".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relative_mix_without_a_finite_budget_is_rejected() {
+        let error = match Cli::try_parse_from([
+            "quasar", "prepare", "--mix", "1:data/a", "--mix", "1:data/b",
+        ]) {
+            Ok(_) => panic!("mix without --tokens should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("--tokens"), "{error}");
+    }
+
     #[test]
     fn only_the_measured_presets_leave_the_training_defaults() {
         let turbo = Preset::TinyTurbo.run_defaults();
@@ -620,6 +793,16 @@ mod tests {
         assert_eq!(turbo.head_dtype, Some(config::HeadDtype::F16));
         assert_eq!(turbo.ffn_dtype, Some(config::FfnDtype::F16));
         assert_eq!(turbo.mamba_dtype, Some(config::MambaDtype::F16));
+
+        // Keep docs/DATA.md's 24-hour recipe tied to the actual preset:
+        // 11,200 steps at 18k tok/s leaves about 80 minutes for startup,
+        // validation and checkpoints.
+        let turbo_tokens_per_step =
+            turbo.micro_batch * turbo.accum * Preset::TinyTurbo.config().seq_len;
+        assert_eq!(turbo_tokens_per_step, 131_072);
+        assert_eq!(11_200 * turbo_tokens_per_step, 1_468_006_400);
+        assert!(11_865 * turbo_tokens_per_step <= 18_000 * 86_400);
+        assert!(11_866 * turbo_tokens_per_step > 18_000 * 86_400);
 
         let nano = Preset::FactorioNano.run_defaults();
 

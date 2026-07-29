@@ -35,14 +35,21 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// Collect every readable file under `roots`, recursively.
+    /// Collect every supported document file under `roots`, recursively.
     ///
     /// `field` names the parquet column or JSON key holding the document text —
     /// `text` for FineWeb-Edu and most of the Hub, `content` for some code sets.
+    /// Unsupported files inside a directory are ignored (notably the metadata
+    /// written by `hf download --local-dir`); an unsupported file named
+    /// explicitly is retained so [`reader`] can report the mistake.
     pub fn open(roots: &[PathBuf], field: &str) -> Result<Self, Error> {
         let mut paths = Vec::new();
         for root in roots {
-            collect(root, &mut paths)?;
+            if root.is_file() {
+                paths.push(root.to_owned());
+            } else {
+                collect(root, &mut paths)?;
+            }
         }
         paths.sort();
         Ok(Self { paths, field: field.to_owned() })
@@ -114,13 +121,22 @@ fn jsonl_docs(path: &Path, field: &str) -> Result<Docs, Error> {
 
 fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), Error> {
     if root.is_file() {
-        out.push(root.to_owned());
+        if supported(root) {
+            out.push(root.to_owned());
+        }
         return Ok(());
     }
     for entry in std::fs::read_dir(root).map_err(Error::Io)? {
         collect(&entry.map_err(Error::Io)?.path(), out)?;
     }
     Ok(())
+}
+
+fn supported(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("parquet" | "jsonl" | "json" | "txt" | "text" | "md")
+    )
 }
 
 impl From<io::Error> for Error {
@@ -190,5 +206,21 @@ mod tests {
         let error = corpus.docs().next().unwrap().unwrap_err();
 
         assert!(error.to_string().contains("a.jsonl"), "{error}");
+    }
+
+    /// `hf download --local-dir` keeps transfer metadata below `.cache`.
+    /// A directory accepted by the CLI must not mistake that metadata for a
+    /// corpus shard.
+    #[test]
+    fn download_cache_metadata_is_not_a_document() {
+        let dir = dir(&[("a.jsonl", "{\"text\":\"one\"}\n")]);
+        let cache = dir.path().join(".cache/huggingface/download");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("a.jsonl.metadata"), "etag").unwrap();
+
+        let corpus = Corpus::open(&[dir.path().to_owned()], "text").unwrap();
+
+        let docs: Vec<_> = corpus.docs().map(Result::unwrap).collect();
+        assert_eq!(docs, ["one"]);
     }
 }

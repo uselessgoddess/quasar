@@ -118,7 +118,14 @@ jobs:
   # Freeze the production optimizer-step baseline, then establish whether this
   # exact Burn/CubeCL/Vulkan stack can reach RDNA4 matrix throughput at all.
   # Precision work is gated on these numbers instead of a global dtype guess.
+  #
+  # Not per commit. There is one card and therefore one queue, and an hour of it
+  # spent on a branch that is still being edited is an hour the next branch waits
+  # -- so the self-hosted jobs run on push to main, where the number becomes the
+  # baseline, and on `workflow_dispatch`, where somebody is asking for it:
+  #     gh workflow run ci.yml --ref <branch>
   gpu-benchmark:
+    if: github.event_name != 'pull_request'
     needs: backend-spike
     runs-on: self-hosted
     timeout-minutes: 60
@@ -178,8 +185,10 @@ jobs:
   # gradient it was handed; only this can show whether the recipe still produces
   # one, and which precision it belongs to. It is deliberately independent of
   # `gpu-benchmark`: throughput and convergence fail for different reasons, and
-  # a job that answers both answers neither when it goes red.
+  # a job that answers both answers neither when it goes red. Dispatched rather
+  # than per commit, for the same reason as `gpu-benchmark`.
   stability:
+    if: github.event_name != 'pull_request'
     runs-on: self-hosted
     timeout-minutes: 90
     steps:
@@ -216,7 +225,9 @@ jobs:
   # P7 bypasses CubeCL's AMD matmul compiler and measures the vendor library
   # directly on the same forward/backward projection triplet as the Vulkan
   # reference. It remains isolated until both precision and speed gates pass.
+  # Dispatched rather than per commit, for the same reason as `gpu-benchmark`.
   backend-spike:
+    if: github.event_name != 'pull_request'
     runs-on: self-hosted
     timeout-minutes: 30
     steps:

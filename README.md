@@ -88,7 +88,10 @@ the paired smoothed loss again within 0.0060%. SSD coefficients,
 discretization, recurrent state, norms, elementwise operations, residuals and
 master weights remain fp32. The vendored burn-mamba branch uses a measured
 fused CubeCL rank-one scan by default and
-retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch.
+retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch. Its
+backward replays each eight-token block forward from a checkpoint; dividing the
+decay back out instead is cheaper, and cost `tiny-turbo` its gradients around
+step 70 at every precision (issue #23).
 Select `--checkpointing true --ssd recalculated` if a larger override runs out
 of memory. Other presets retain the memory-saving defaults. See
 `docs/DESIGN.md` §3, [`docs/KERNELS.md`](docs/KERNELS.md), and the
@@ -164,6 +167,16 @@ arm that survives by learning nothing fails too. A unit test can show the
 trainer rejects a non-finite gradient it is handed; only the card can show
 whether a recipe produces one, which is why this runs on the self-hosted runner
 as the `stability` job.
+
+There is one card behind that runner, so `stability`, `gpu-benchmark` and
+`backend-spike` do not run per commit: they run on push to `main` and on
+`gh workflow run ci.yml --ref <branch>`, when somebody is actually asking for
+the number.
+
+There is one card behind that runner, so `stability`, `gpu-benchmark` and
+`backend-spike` do not run per commit: they run on push to `main` and on
+`gh workflow run ci.yml --ref <branch>`, when somebody is actually asking for
+the number.
 
 ## Factorio blueprints
 

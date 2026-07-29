@@ -365,6 +365,12 @@ bf16 — ответ на прогон, который тратит шаги на
 f16-head, f16-all, bf16-all) и требует от каждой ветки конечный loss ниже
 `log(vocab)`; job `stability` в CI запускает его на self-hosted RX 9070 XT.
 
+Карта одна, и очередь у неё одна, поэтому все self-hosted job'ы (`stability`,
+`gpu-benchmark`, `backend-spike`) не запускаются на каждый коммит ветки: они
+живут под `if: github.event_name != 'pull_request'`, то есть на push в main, где
+число становится baseline'ом, и на явный `gh workflow run ci.yml --ref <branch>`,
+когда результат нужен как доказательство.
+
 ## 5. Данные
 
 Основной корпус — **FineWeb-Edu, `sample/10BT`** (parquet, ~28 GB). Причины:

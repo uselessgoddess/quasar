@@ -170,8 +170,10 @@ as the `stability` job.
 
 There is one card behind that runner, so `stability`, `gpu-benchmark` and
 `backend-spike` do not run per commit: they run on push to `main` and on
-`gh workflow run ci.yml --ref <branch>`, when somebody is actually asking for
-the number.
+`gh workflow run ci.yml --ref <branch> -f jobs=stability`, when somebody is
+actually asking for the number. `jobs` selects `all`, `stability`, `benchmark`
+or `blueprints`, so asking about convergence does not also spend an hour on
+throughput.
 
 ## Factorio blueprints
 

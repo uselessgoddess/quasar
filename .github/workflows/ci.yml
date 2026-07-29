@@ -4,7 +4,21 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Dispatching everything costs the card an hour of benchmark before the
+  # convergence run it was asked for even starts, so the dispatch says which
+  # question it is asking. `benchmark` carries `backend-spike` with it: the
+  # benchmark job needs it, and a skipped dependency skips its dependents.
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: Which self-hosted jobs to run
+        type: choice
+        default: all
+        options:
+          - all
+          - stability
+          - benchmark
+          - blueprints
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -65,7 +79,9 @@ jobs:
   # parameter -- and the artifacts are the point of it: the metrics board and the
   # contact sheet are what say whether it worked.
   blueprints:
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && (inputs.jobs == 'all' || inputs.jobs == 'blueprints')
     runs-on: self-hosted
     timeout-minutes: 75
     steps:
@@ -130,9 +146,12 @@ jobs:
   # spent on a branch that is still being edited is an hour the next branch waits
   # -- so the self-hosted jobs run on push to main, where the number becomes the
   # baseline, and on `workflow_dispatch`, where somebody is asking for it:
-  #     gh workflow run ci.yml --ref <branch>
+  #     gh workflow run ci.yml --ref <branch> -f jobs=benchmark
   gpu-benchmark:
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_dispatch'
+          || inputs.jobs == 'all' || inputs.jobs == 'benchmark')
     needs: backend-spike
     runs-on: self-hosted
     timeout-minutes: 60
@@ -195,7 +214,10 @@ jobs:
   # a job that answers both answers neither when it goes red. Dispatched rather
   # than per commit, for the same reason as `gpu-benchmark`.
   stability:
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_dispatch'
+          || inputs.jobs == 'all' || inputs.jobs == 'stability')
     runs-on: self-hosted
     timeout-minutes: 90
     steps:
@@ -234,7 +256,10 @@ jobs:
   # reference. It remains isolated until both precision and speed gates pass.
   # Dispatched rather than per commit, for the same reason as `gpu-benchmark`.
   backend-spike:
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_dispatch'
+          || inputs.jobs == 'all' || inputs.jobs == 'benchmark')
     runs-on: self-hosted
     timeout-minutes: 30
     steps:

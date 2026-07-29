@@ -368,8 +368,10 @@ f16-head, f16-all, bf16-all) и требует от каждой ветки ко
 Карта одна, и очередь у неё одна, поэтому все self-hosted job'ы (`stability`,
 `gpu-benchmark`, `backend-spike`) не запускаются на каждый коммит ветки: они
 живут под `if: github.event_name != 'pull_request'`, то есть на push в main, где
-число становится baseline'ом, и на явный `gh workflow run ci.yml --ref <branch>`,
-когда результат нужен как доказательство.
+число становится baseline'ом, и на явный
+`gh workflow run ci.yml --ref <branch> -f jobs=stability`, когда результат нужен
+как доказательство. Вход `jobs` выбирает `all`, `stability`, `benchmark` или
+`blueprints`: вопрос про сходимость не должен оплачивать час про throughput.
 
 ## 5. Данные
 

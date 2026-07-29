@@ -38,6 +38,12 @@ cargo run --release -- tokenizer data/fineweb-edu --vocab-size 8192
 cargo run --release -- prepare data/fineweb-edu --out data/shards
 cargo run --release -- train tiny --data data/shards --out runs/tiny
 
+# a finite token mixture; weights are relative and measured after tokenization
+cargo run --release -- prepare \
+    --mix 55:data/dclm-edu --mix 35:data/fineweb-edu \
+    --mix 5:data/finemath --mix 5:data/cosmopedia \
+    --tokens 1468006400 --out data/turbo-day
+
 # measured RX 9070 XT recipe: 640×12, batch 4, serial SSD, no checkpoint replay
 cargo run --release --no-default-features --features vulkan -- \
     train tiny-turbo --data data/shards --out runs/turbo
@@ -59,6 +65,12 @@ default `8 × 16 × 2048` effective batch. Changing either batch knob also chang
 the total token budget unless `--steps` is adjusted. The startup summary prints
 both quantities before training begins. A progress item in the dashboard is one
 optimizer step, not one sequence or token.
+
+[`docs/DATA.md`](docs/DATA.md) derives the 1.468B-token/11,200-step recipe for a
+24-hour `tiny-turbo` run at 18k tok/s, compares current small-model corpora, and
+explains the recommended DCLM-Edu/FineWeb-Edu/FineMath/Cosmopedia mixture.
+Weighted preparation writes `mix.json` with requested and actual per-source
+token shares next to the shards.
 
 When training is attached to a terminal it opens Burn's official TUI, with
 live plots for training/validation loss, perplexity, bits-per-byte, learning

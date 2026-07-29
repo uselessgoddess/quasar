@@ -388,10 +388,13 @@ hf download HuggingFaceFW/fineweb-edu --repo-type dataset \
     --include "sample/10BT/*" --local-dir data/fineweb-edu
 ```
 
-Опциональная примесь для `base`: 5% FineMath-4+ и 5% кода — обе улучшают
-рассуждение сильнее, чем такой же объём веба. `Corpus` читает parquet/jsonl/txt
-и рекурсивно обходит каталоги, так что примесь — это просто ещё один путь в
-аргументах `prepare`.
+Для смеси просто перечислить каталоги недостаточно: это даёт долю, случайно
+равную объёму скачанных файлов. `prepare --mix WEIGHT:PATH --tokens N` выбирает
+источник по уже записанным **токенам**, то есть в той же единице, в которой
+равномерно семплирует training loader, и сохраняет фактический состав в
+`mix.json`. Актуальный разбор SmolLM2/DCLM-Edu/FineWeb-Edu и точный суточный
+рецепт `tiny-turbo` вынесены в [`DATA.md`](DATA.md); базовая рекомендация там —
+55% DCLM-Edu, 35% FineWeb-Edu, 5% FineMath-4+ и 5% Cosmopedia v2.
 
 Токенизатор — byte-level BPE (`tokenizers` 0.23) с разбиением цифр,
 `vocab_size = 8192` по умолчанию и 32768 для `base` (§2.6). Потолок словаря —

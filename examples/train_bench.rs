@@ -1,8 +1,10 @@
 //! Short, data-independent GPU benchmark for the real tiny-turbo training step.
 //!
-//! It deliberately uses the full 32k vocabulary and the production optimizer;
-//! only corpus I/O and checkpoint-file writes are omitted from the timed
-//! region. The first complete optimizer step is warm-up so CubeCL fusion and
+//! It deliberately uses the preset's own vocabulary and the production
+//! optimizer; only corpus I/O and checkpoint-file writes are omitted from the
+//! timed region. That vocabulary is 8192 since issue #23; `legacy-turbo` keeps
+//! the 32768 of the measurements in `docs/TRAINING_SPEED.md`, so the two are
+//! not a paired comparison of shape alone. The first complete optimizer step is warm-up so CubeCL fusion and
 //! autotuning do not contaminate the measurement.
 
 mod bench_support;
@@ -95,11 +97,14 @@ impl BenchModel {
     fn config(self) -> Model {
         let mut cfg = Model::tiny_turbo();
         if matches!(self, Self::LegacyTurbo) {
-            // The pre-optimization shape remains available so the paired A/B
-            // can be reproduced after the wide candidate became the preset.
+            // The pre-optimization preset remains available so the paired A/B
+            // can be reproduced after the wide candidate became the preset. Its
+            // vocabulary is part of it: `docs/TRAINING_SPEED.md` measured that
+            // A/B at 32768, and issue #23 narrowed only the current preset.
             cfg.d_model = 512;
             cfg.n_layers = 20;
             cfg.attn_heads = 8;
+            cfg.vocab_size = 32_768;
         }
         cfg.validate().expect("benchmark model must be valid");
         cfg
@@ -284,7 +289,10 @@ mod tests {
     #[test]
     fn production_shape_trades_depth_for_width_without_changing_work() {
         let narrow = BenchModel::LegacyTurbo.config();
-        let wide = BenchModel::TinyTurbo.config();
+        // At the vocabulary the A/B was run on. The claim is about depth
+        // against width, and comparing 512 × 20 at 32768 with 640 × 12 at 8192
+        // would answer a different question with the same two numbers.
+        let wide = Model { vocab_size: narrow.vocab_size, ..BenchModel::TinyTurbo.config() };
 
         let param_ratio = wide.budget().total as f64 / narrow.budget().total as f64;
         let flop_ratio = wide.flops_per_token() / narrow.flops_per_token();
@@ -294,6 +302,21 @@ mod tests {
         assert!((flop_ratio - 1.0).abs() < 0.01, "FLOP ratio {flop_ratio}");
         assert!(activation_ratio < 0.81, "activation ratio {activation_ratio}");
         assert_eq!((wide.d_model, wide.n_layers, wide.attn_heads), (640, 12, 10));
+    }
+
+    /// The preset the benchmark actually times is narrower than either arm of
+    /// that A/B, and issue #23 is the reason: the vocabulary is the one cut
+    /// that takes parameters, FLOPs and activations at once.
+    #[test]
+    fn the_benchmarked_preset_carries_the_narrowed_vocabulary() {
+        let turbo = BenchModel::TinyTurbo.config();
+        let legacy = BenchModel::LegacyTurbo.config();
+
+        assert_eq!(turbo.vocab_size, quasar::config::SMALL_VOCAB);
+        assert_eq!(legacy.vocab_size, 32_768);
+        assert!(turbo.budget().total < legacy.budget().total);
+        assert!(turbo.flops_per_token() < legacy.flops_per_token());
+        assert!(turbo.activations(1).total < legacy.activations(1).total);
     }
 
     #[test]

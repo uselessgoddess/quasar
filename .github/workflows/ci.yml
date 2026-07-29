@@ -4,7 +4,32 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Dispatching everything costs the card an hour of benchmark before the
+  # convergence run it was asked for even starts, so the dispatch says which
+  # question it is asking. `benchmark` carries `backend-spike` with it: the
+  # benchmark job needs it, and a skipped dependency skips its dependents.
+  #
+  # A pull request asks the same question by putting `[ci: stability]` (or
+  # `benchmark`, `blueprints`, `fineweb`) in its description; the next push to
+  # the branch then runs that job and nothing else self-hosted.
+  # `workflow_dispatch` cannot reach a branch that lives in a fork, and a
+  # contributor working from one has no labels to set, so the description is
+  # the only channel they have. `fineweb` is deliberately excluded from `all`:
+  # it is a four-hour acceptance run, not another per-commit check. Take the
+  # line back out once the number is in, or every further push spends the card
+  # again.
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: Which self-hosted jobs to run
+        type: choice
+        default: all
+        options:
+          - all
+          - stability
+          - benchmark
+          - blueprints
+          - fineweb
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -17,7 +42,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,6 +56,14 @@ jobs:
       # The default backend is CPU, so the whole suite -- real forward and
       # backward passes included -- runs on a hosted runner.
       - run: cargo test --all-targets
+      # The subtree is excluded from the workspace, so the line above never
+      # reaches it, and the fused SSD scan quasar trains through carries a custom
+      # backward nothing else checks -- issue #23 was a numerical bug in exactly
+      # that. Share the cached target directory rather than build a second one.
+      - run: cargo test --manifest-path vendor/burn-mamba/Cargo.toml --lib
+        env:
+          CARGO_TARGET_DIR: target
+      - run: python3 experiments/test_fineweb_report.py
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 
@@ -58,7 +91,12 @@ jobs:
   # parameter -- and the artifacts are the point of it: the metrics board and the
   # contact sheet are what say whether it worked.
   blueprints:
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      (github.event_name == 'workflow_dispatch'
+       && (inputs.jobs == 'all' || inputs.jobs == 'blueprints'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: blueprints]')))
     runs-on: self-hosted
     timeout-minutes: 75
     steps:
@@ -118,7 +156,21 @@ jobs:
   # Freeze the production optimizer-step baseline, then establish whether this
   # exact Burn/CubeCL/Vulkan stack can reach RDNA4 matrix throughput at all.
   # Precision work is gated on these numbers instead of a global dtype guess.
+  #
+  # Not per commit. There is one card and therefore one queue, and an hour of it
+  # spent on a branch that is still being edited is an hour the next branch waits
+  # -- so the self-hosted jobs run on push to main, where the number becomes the
+  # baseline, and where somebody is asking for it by name:
+  #     gh workflow run ci.yml --ref <branch> -f jobs=benchmark
+  # or, from a fork branch, by putting `[ci: benchmark]` in the pull request.
   gpu-benchmark:
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'benchmark'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: benchmark]')))
     needs: backend-spike
     runs-on: self-hosted
     timeout-minutes: 60
@@ -173,10 +225,116 @@ jobs:
           name: performance-diagnostics
           path: benchmark-logs/
 
+  # Issue #23: the reported recipe, past the steps it reported failing at, in
+  # every precision the card can run. A unit test can show the guard rejects a
+  # gradient it was handed; only this can show whether the recipe still produces
+  # one, and which precision it belongs to. It is deliberately independent of
+  # `gpu-benchmark`: throughput and convergence fail for different reasons, and
+  # a job that answers both answers neither when it goes red. Dispatched rather
+  # than per commit, for the same reason as `gpu-benchmark`.
+  stability:
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'stability'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: stability]')))
+    runs-on: self-hosted
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          mkdir -p benchmark-logs/stability
+          {
+            git rev-parse HEAD
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram
+          } 2>&1 | tee benchmark-logs/stability/environment.log
+      # `STABILITY_ACCUM` is the only departure from the reported command, and
+      # `examples/stability.sh` says why: four verbatim arms are over an hour on
+      # the one card the whole self-hosted half of CI shares, and a quarter of
+      # the accumulation at the same rate is four times the gradient noise,
+      # which is the harder test rather than the softer one. The micro-batch,
+      # and therefore the VRAM shape, is the reported one.
+      - name: The issue #23 recipe in fp32, fp16 and bf16
+        env:
+          STABILITY_ACCUM: "8"
+        run: BACKEND=vulkan examples/stability.sh
+      - name: Preserve the four arms
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability
+          path: |
+            benchmark-logs/stability/*.log
+            benchmark-logs/stability/*.result
+
+  # The short synthetic stability matrix answers whether the reported failure
+  # still happens around step 90. This one answers the stronger acceptance
+  # question from issue #23: does the fastest production recipe keep learning
+  # for 235.9M real FineWeb-Edu tokens? It is never implied by `push` or `all`;
+  # four hours on the repository's only card must be requested by this exact
+  # selector:
+  #     gh workflow run ci.yml --ref <branch> -f jobs=fineweb
+  # or `[ci: fineweb]` in a fork pull request before its next push.
+  fineweb-soak:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.jobs == 'fineweb')
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.body, '[ci: fineweb]'))
+    runs-on: self-hosted
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          mkdir -p benchmark-logs/fineweb
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            cargo -V
+            uname -a
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram --showclocks \
+              --showuse --showtemp --showpower
+          } 2>&1 | tee benchmark-logs/fineweb/environment.log
+      # One pinned 2.15-GB parquet shard contains more than the 235.9M tokens
+      # the run consumes. Cache both it and the derived 8k-token shards so a
+      # runner interruption resumes at training rather than redownloading 10BT.
+      - name: Cache the pinned FineWeb-Edu shard
+        uses: actions/cache@v4
+        with:
+          path: data/fineweb-soak
+          key: fineweb-edu-10bt-000-87f09149-vocab8192-v1
+      - name: Train 235.9M real tokens with the fastest accepted recipe
+        run: examples/fineweb_soak.sh
+      - name: Preserve the learning evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fineweb-soak
+          path: |
+            benchmark-logs/fineweb/*.log
+            benchmark-logs/fineweb/*.result
+
   # P7 bypasses CubeCL's AMD matmul compiler and measures the vendor library
   # directly on the same forward/backward projection triplet as the Vulkan
   # reference. It remains isolated until both precision and speed gates pass.
+  # Dispatched rather than per commit, for the same reason as `gpu-benchmark`.
   backend-spike:
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'benchmark'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: benchmark]')))
     runs-on: self-hosted
     timeout-minutes: 30
     steps:

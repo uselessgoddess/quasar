@@ -11,15 +11,18 @@ nothing to slide over:
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
 | `factorio-nano` | 3.6M | 8.2M | 0.05 GiB | 0.12 GiB | 134 |
-| `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
-| `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
+| `tiny-turbo` | 62.6M | 129.8M | 0.93 GiB | 1.09 GiB | 14 |
+| `tiny` | 146.7M | 329.4M | 2.19 GiB | 6.62 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
 
 `docs/DESIGN.md` justifies every number above, states the training-time budget
 honestly, and explains why this is not a mixture of experts.
 [`docs/MEMORY.md`](docs/MEMORY.md) takes apart the last two columns — where the
 VRAM actually goes, which burn-mamba setting moves it, and what `tiny-turbo`
-gives up to fit eleven estimated micro-batches where `tiny` fits two.
+gives up to fit fourteen estimated micro-batches where `tiny` fits two.
+
+`tiny` and `tiny-turbo` share an 8192-token vocabulary; only `base` is large
+enough for 32768 to be worth its embedding, its head GEMM and its logits.
 
 ## Pipeline
 
@@ -31,7 +34,7 @@ cargo run --release -- budget tiny
 hf download HuggingFaceFW/fineweb-edu --repo-type dataset \
     --include "sample/10BT/*" --local-dir data/fineweb-edu
 
-cargo run --release -- tokenizer data/fineweb-edu --vocab-size 32768
+cargo run --release -- tokenizer data/fineweb-edu --vocab-size 8192
 cargo run --release -- prepare data/fineweb-edu --out data/shards
 cargo run --release -- train tiny --data data/shards --out runs/tiny
 
@@ -85,7 +88,10 @@ the paired smoothed loss again within 0.0060%. SSD coefficients,
 discretization, recurrent state, norms, elementwise operations, residuals and
 master weights remain fp32. The vendored burn-mamba branch uses a measured
 fused CubeCL rank-one scan by default and
-retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch.
+retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch. Its
+backward replays each eight-token block forward from a checkpoint; dividing the
+decay back out instead is cheaper, and cost `tiny-turbo` its gradients around
+step 70 at every precision (issue #23).
 Select `--checkpointing true --ssd recalculated` if a larger override runs out
 of memory. Other presets retain the memory-saving defaults. See
 `docs/DESIGN.md` §3, [`docs/KERNELS.md`](docs/KERNELS.md), and the
@@ -147,6 +153,34 @@ examples/smoke.sh
 
 Fits a tokenizer, shards a synthetic corpus, trains 50 steps, evaluates and
 samples — the whole pipeline in under a minute on a CPU.
+
+## Checking that a recipe trains
+
+```sh
+BACKEND=vulkan examples/stability.sh
+```
+
+The recipe of issue #23 — `tiny-turbo` at micro-batch 4 — past the steps it
+reported coming apart at, in fp32, fp16 on the head, fp16 everywhere and bf16
+everywhere. Each arm has to finish with a loss below the uniform baseline, so an
+arm that survives by learning nothing fails too. A unit test can show the
+trainer rejects a non-finite gradient it is handed; only the card can show
+whether a recipe produces one, which is why this runs on the self-hosted runner
+as the `stability` job.
+
+There is one card behind that runner, so `stability`, `gpu-benchmark` and
+`backend-spike` do not run per commit: they run on push to `main`, and otherwise
+only when somebody asks for the number by name —
+`gh workflow run ci.yml --ref <branch> -f jobs=stability`, or, from a branch in
+a fork, `[ci: stability]` in the pull request description, which the next push
+picks up. Both selectors take `all`, `stability`, `benchmark`, `blueprints` or
+`fineweb`, so asking about convergence does not also spend an hour on
+throughput. `fineweb` is a special case: it is never included in `all`, because
+[`examples/fineweb_soak.sh`](examples/fineweb_soak.sh) is the explicit
+3–4-hour acceptance run over 235.9M tokens from the pinned FineWeb-Edu 10BT
+snapshot. It requires 1800/1800 steps, no non-finite gradients, falling train
+loss and validation bpb, and median steady throughput of at least 17k tok/s.
+Take the line back out of the description once the answer is in.
 
 ## Factorio blueprints
 

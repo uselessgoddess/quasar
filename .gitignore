@@ -6,3 +6,4 @@
 *.parquet
 # сохранённые страницы к экспериментам — рядом лежит текстовая версия
 experiments/*.html
+/benchmark-logs

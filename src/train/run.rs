@@ -106,23 +106,35 @@ pub enum Error {
     },
     /// The loss stopped being a number.
     ///
-    /// A diverged run is not a worse run, it is not a run: one NaN reaches
-    /// every weight within a step, every sample afterwards is empty, and the
-    /// grade sheet at the end reports a flat zero that reads exactly like a
-    /// model which learnt nothing. That is how a four-thousand-step run
-    /// finished green with a dead model in it. The loss is already read on
-    /// logging steps, so noticing costs nothing until it fires.
+    /// A diverged run is not a worse run, it is not a run: every sample
+    /// afterwards is empty and the grade sheet at the end reports a flat zero
+    /// that reads exactly like a model which learnt nothing. That is how a
+    /// four-thousand-step run finished green with a dead model in it. The
+    /// update that produced the NaN is rejected before either optimizer sees
+    /// it, so `params` is normally empty and the loss came apart in the
+    /// forward; anything listed there is a tensor the guard did not cover.
     Diverged {
         step: usize,
         params: Vec<String>,
     },
-    /// Even the minimum fp16 loss scale produced a non-finite gradient. The
-    /// rejected update never reached either optimizer or the model.
+    /// [`SKIP_BUDGET`] optimizer steps in a row produced a non-finite gradient
+    /// from a finite loss. Every one of them was discarded before it reached
+    /// an optimizer, so the model is intact — it is the run that is stuck.
     NonfiniteGradient {
         step: usize,
+        skipped: usize,
         loss_scale: f64,
     },
 }
+
+/// How many consecutive optimizer steps may be discarded before a run is
+/// declared stuck.
+///
+/// A loss spike costs one batch out of thousands and is not worth ending a run
+/// over — that is what the guard is for. A model whose gradients overflow from
+/// a perfectly finite loss on twenty batches running is not spiking, and no
+/// twenty-first batch is going to be the one that lands.
+const SKIP_BUDGET: usize = 20;
 
 /// Train `cfg` on the shards under `data`, checkpointing into `out`.
 ///
@@ -152,12 +164,15 @@ pub fn run(
 
     let head_dtype = run.head_dtype.as_ref().map(|dtype| match dtype {
         config::HeadDtype::F16 => FloatDType::F16,
+        config::HeadDtype::Bf16 => FloatDType::BF16,
     });
     let ffn_dtype = run.ffn_dtype.as_ref().map(|dtype| match dtype {
         config::FfnDtype::F16 => FloatDType::F16,
+        config::FfnDtype::Bf16 => FloatDType::BF16,
     });
     let mamba_dtype = run.mamba_dtype.as_ref().map(|dtype| match dtype {
         config::MambaDtype::F16 => FloatDType::F16,
+        config::MambaDtype::Bf16 => FloatDType::BF16,
     });
     let mut model = Quasar::new_with_ssd_and_projection_dtypes(
         cfg,
@@ -179,9 +194,13 @@ pub fn run(
         (optim, state) = (loaded, resumed);
         println!("resuming {} at step {}", dir.display(), state.step);
     }
-    let mut loss_scaler =
-        (run.head_dtype.is_some() || run.ffn_dtype.is_some() || run.mamba_dtype.is_some())
-            .then(|| state.loss_scaler.unwrap_or_else(|| DynamicLossScaler::new(200)));
+    // Only fp16 needs a loss scale. bf16 carries fp32's exponent range in the
+    // same sixteen bits, so a gradient fp32 can hold is a gradient bf16 can
+    // hold, and scaling it would buy nothing for a halving that costs a step.
+    let seams = [head_dtype, ffn_dtype, mamba_dtype];
+    let mut loss_scaler = seams
+        .contains(&Some(FloatDType::F16))
+        .then(|| state.loss_scaler.unwrap_or_else(|| DynamicLossScaler::new(200)));
     state.loss_scaler = loss_scaler;
 
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
@@ -194,21 +213,19 @@ pub fn run(
         total_tokens as f64 / 1e9,
         per_step
     );
-    if let Some(scaler) = loss_scaler {
-        let mut seams = Vec::new();
-        if run.head_dtype.is_some() {
-            seams.push("output head");
-        }
-        if run.ffn_dtype.is_some() {
-            seams.push("FFN projections");
-        }
-        if run.mamba_dtype.is_some() {
-            seams.push("Mamba projections");
-        }
+    let named: Vec<String> = ["output head", "FFN projections", "Mamba projections"]
+        .into_iter()
+        .zip(seams)
+        .filter_map(|(seam, dtype)| Some(format!("{} {seam}", precision(dtype?))))
+        .collect();
+    if !named.is_empty() {
         println!(
-            "training precision: fp16 {} | fp32 master/norm/residual/SSD state/logits/loss | loss scale {:.0}",
-            seams.join(" + "),
-            scaler.scale()
+            "training precision: {} | fp32 master/norm/residual/SSD state/logits/loss | {}",
+            named.join(" + "),
+            match loss_scaler {
+                Some(scaler) => format!("loss scale {:.0}", scaler.scale()),
+                None => "no loss scale: bf16 spans the fp32 exponent range".to_string(),
+            }
         );
     }
     let mut dashboard = Dashboard::new(run.steps, state.step);
@@ -221,28 +238,29 @@ pub fn run(
         );
     }
 
+    let mut skipped = 0;
     for step in state.step..run.steps {
         let lr = schedule.lr(step);
         // Reading a loss scalar blocks until the device catches up, so it is
-        // read on logging steps only; the rest never leave the queue.
+        // read on logging steps and discarded ones only; the rest never leave
+        // the queue.
         let logging = due(step, run.log_every);
         let logged_loss = loop {
             let loss_scale = loss_scaler.as_ref().map_or(1.0, DynamicLossScaler::scale);
-            let mut logged_loss = None;
+            let mut batch_loss = None;
 
             for micro in 0..run.accum {
                 let batch = train.train((step * run.accum + micro) as u64, &device);
                 let loss = model.loss(batch.input, batch.target);
-                if logging {
-                    // Keep the reduction on the device. Reading every micro-batch
-                    // separately serialises the GPU queue `accum` times (96 times
-                    // in the report that prompted issue #7).
-                    let nll = loss.nll.clone().detach();
-                    logged_loss = Some(match logged_loss.take() {
-                        Some(total) => total + nll,
-                        None => nll,
-                    });
-                }
+                // Keep the reduction on the device. Reading every micro-batch
+                // separately serialises the GPU queue `accum` times (96 times
+                // in the report that prompted issue #7); summing there costs
+                // one scalar add per micro-batch and blocks nothing.
+                let nll = loss.nll.clone().detach();
+                batch_loss = Some(match batch_loss.take() {
+                    Some(total) => total + nll,
+                    None => nll,
+                });
                 // Scaling here rather than after accumulating keeps the gradient
                 // of an accumulated step identical to that of one big batch.
                 let total = loss.total.div_scalar(run.accum as f64);
@@ -251,33 +269,62 @@ pub fn run(
                 optim.accumulate(&model, total.backward());
             }
 
-            let Some(scaler) = loss_scaler.as_mut() else {
-                model = optim.step(lr, model);
-                break logged_loss;
-            };
+            // Every step goes through the finiteness gate, at every precision.
+            // An unguarded fp32 step is the one that ends runs: a single NaN
+            // gradient reaches both optimizers' moments and every parameter
+            // within the step, and what the log then reports is 164 dead
+            // tensors rather than the one batch that produced them.
             let (next, finite) = optim.step_scaled(lr, model, loss_scale);
             model = next;
-            scaler.update(finite);
-            if finite {
-                break logged_loss;
+            if let Some(scaler) = loss_scaler.as_mut() {
+                scaler.update(finite);
             }
-            if loss_scale <= DynamicLossScaler::MIN {
-                return Err(Error::NonfiniteGradient { step: step + 1, loss_scale });
+            if finite {
+                skipped = 0;
+                break batch_loss;
+            }
+
+            // A scale that can still halve is worth one retry of the same
+            // deterministic batch: the overflow is in the fp16 seam, not in
+            // the model, and the retry costs a step rather than the run.
+            if let Some(scaler) = loss_scaler
+                && loss_scale > DynamicLossScaler::MIN
+            {
+                println!(
+                    "non-finite gradient at step {}; discarded update and retrying at loss scale {:.0}",
+                    step + 1,
+                    scaler.scale()
+                );
+                continue;
+            }
+
+            // Nothing left to scale away. Whether this is a spike or the end
+            // of the run is the loss's answer and not the gradient's: a finite
+            // loss means one bad batch, and a loss that is not a number means
+            // the weights have already left the range the forward can carry.
+            let loss = read(batch_loss, run.accum);
+            if !loss.is_finite() {
+                return Err(Error::Diverged { step: step + 1, params: nonfinite(&model) });
+            }
+            skipped += 1;
+            if skipped >= SKIP_BUDGET {
+                return Err(Error::NonfiniteGradient { step: step + 1, skipped, loss_scale });
             }
             println!(
-                "non-finite gradient at step {}; discarded update and retrying at loss scale {:.0}",
-                step + 1,
-                scaler.scale()
+                "non-finite gradient at step {} from a finite loss {loss:.4}; skipped the update \
+                 ({skipped} in a row)",
+                step + 1
             );
+            break None;
         };
         state = State { step: step + 1, tokens: state.tokens + per_step, loss_scaler };
         window.steps += 1;
 
-        if logging {
-            window.loss = logged_loss
-                .expect("a logging step contains at least one micro-batch")
-                .div_scalar(run.accum as f64)
-                .into_scalar::<f32>() as f64;
+        // A skipped step reports no loss: the batch it read never became an
+        // update, and averaging it into the window would draw a line the model
+        // never walked.
+        if logging && let Some(total) = logged_loss {
+            window.loss = read(Some(total), run.accum);
             if !window.loss.is_finite() {
                 return Err(Error::Diverged { step: state.step, params: nonfinite(&model) });
             }
@@ -327,6 +374,26 @@ pub fn run(
     dashboard.finish();
     println!("final: step {} | {final_report}", state.step);
     Ok(())
+}
+
+/// What a training log calls a reduced compute dtype.
+fn precision(dtype: FloatDType) -> &'static str {
+    match dtype {
+        FloatDType::F16 => "fp16",
+        FloatDType::BF16 => "bf16",
+        other => panic!("{other:?} is not a reduced compute dtype"),
+    }
+}
+
+/// The mean cross-entropy of a step, in the units the dashboard prints.
+///
+/// This is the read that blocks on the device, so it happens at most once per
+/// optimizer step and only when something is going to be done with it.
+fn read(total: Option<Tensor<1>>, accum: usize) -> f64 {
+    total
+        .expect("a step contains at least one micro-batch")
+        .div_scalar(accum as f64)
+        .into_scalar::<f32>() as f64
 }
 
 /// Every parameter of `model` that holds something which is not a number.
@@ -522,10 +589,12 @@ impl std::fmt::Display for Error {
                     "\nlower --lr, lengthen --warmup, or take the hidden matrices off Muon with --muon false"
                 )
             }
-            Self::NonfiniteGradient { step, loss_scale } => write!(
+            Self::NonfiniteGradient { step, skipped, loss_scale } => write!(
                 f,
-                "training produced non-finite gradients at step {step} with minimum loss scale \
-                 {loss_scale}; the update was discarded"
+                "training produced non-finite gradients from a finite loss on {skipped} steps in \
+                 a row, up to step {step}, at loss scale {loss_scale}. Every one of those updates \
+                 was discarded, so the checkpoint is still a model.\nlower --lr, lengthen \
+                 --warmup, or take the hidden matrices off Muon with --muon false"
             ),
         }
     }
@@ -567,9 +636,13 @@ mod tests {
             * run.accum as u64
             * config::Model::tiny().seq_len as u64;
 
-        // A 162.5M-parameter model needs roughly 20 tokens per parameter, not
-        // the 96.8 tokens per parameter scheduled by the old 60k-step recipe.
-        assert!((3_000_000_000..=3_500_000_000).contains(&tokens), "{tokens} tokens");
+        // `TOKENS_PER_PARAM` is a floor, not a target: the default schedules 22
+        // tokens per parameter where the old 60k-step recipe scheduled 96.8.
+        // Stated against the floor rather than a literal because issue #23
+        // narrowed the vocabulary, which moved the parameter count and so the
+        // floor with it — the same recipe, still above it.
+        let floor = config::Model::tiny().chinchilla_tokens() as u64;
+        assert!((floor..floor * 3 / 2).contains(&tokens), "{tokens} tokens against {floor}");
     }
 
     #[test]
@@ -594,8 +667,12 @@ mod tests {
         let tokens_per_step = 96 * 2_048;
         let throughput = 1_700.0;
         let steps_per_hour = throughput * 3_600.0 / tokens_per_step as f64;
+        // The `tiny` of issue #7, at the 32768 vocabulary it was measured on —
+        // issue #23 narrowed that, and a reported measurement does not move
+        // with a later config.
+        let measured = config::Model { vocab_size: 32_768, ..config::Model::tiny() };
         let (eta_hours, tflops) =
-            speed(40, 60_000, tokens_per_step, throughput, config::Model::tiny().flops_per_token());
+            speed(40, 60_000, tokens_per_step, throughput, measured.flops_per_token());
 
         assert!((steps_per_hour - 31.1).abs() < 0.1);
         assert!((eta_hours / 24.0 - 80.3).abs() < 0.1);
@@ -636,6 +713,54 @@ mod tests {
         assert_eq!(state.loss_scaler.unwrap().scale(), DynamicLossScaler::INITIAL);
     }
 
+    /// A bf16 run carries no loss scaler at all.
+    ///
+    /// Issue #23 is a run that halved its scale to 1 and stopped; there is
+    /// nothing for a scale to rescue in bf16, because it holds every exponent
+    /// fp32 holds. Configuring one anyway would leave the run paying a
+    /// discarded step for every spike it could have absorbed.
+    #[test]
+    fn a_bf16_run_needs_no_loss_scale() {
+        let data = tempfile::tempdir().unwrap();
+        shards(&data.path().join("train"));
+        shards(&data.path().join("valid"));
+        let out = tempfile::tempdir().unwrap();
+        let run = tiny_run()
+            .with_head_dtype(Some(config::HeadDtype::Bf16))
+            .with_ffn_dtype(Some(config::FfnDtype::Bf16))
+            .with_mamba_dtype(Some(config::MambaDtype::Bf16));
+
+        super::run(&config::Model::toy(), &run, data.path(), out.path(), &Device::default())
+            .unwrap();
+
+        let dir = checkpoint::latest(out.path()).unwrap();
+        let state: State =
+            serde_json::from_reader(std::fs::File::open(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state.step, 2);
+        assert!(state.loss_scaler.is_none(), "{:?}", state.loss_scaler);
+    }
+
+    /// One fp16 seam is enough to need the scale, even alongside bf16 ones.
+    #[test]
+    fn a_mixed_bf16_and_fp16_run_keeps_the_scale_the_fp16_seam_needs() {
+        let data = tempfile::tempdir().unwrap();
+        shards(&data.path().join("train"));
+        shards(&data.path().join("valid"));
+        let out = tempfile::tempdir().unwrap();
+        let run = tiny_run()
+            .with_head_dtype(Some(config::HeadDtype::Bf16))
+            .with_ffn_dtype(Some(config::FfnDtype::F16))
+            .with_mamba_dtype(Some(config::MambaDtype::Bf16));
+
+        super::run(&config::Model::toy(), &run, data.path(), out.path(), &Device::default())
+            .unwrap();
+
+        let dir = checkpoint::latest(out.path()).unwrap();
+        let state: State =
+            serde_json::from_reader(std::fs::File::open(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state.loss_scaler.unwrap().scale(), DynamicLossScaler::INITIAL);
+    }
+
     #[test]
     fn a_run_that_comes_apart_stops_instead_of_finishing_green() {
         // What a diverged run used to do: 4299 steps of NaN, a checkpoint, a
@@ -649,12 +774,52 @@ mod tests {
         let error = run(&config::Model::toy(), &blown, data.path(), out.path(), &Device::default())
             .unwrap_err();
 
+        let message = format!("{error}");
         let Error::Diverged { step, params } = error else {
-            panic!("{error}");
+            panic!("{message}");
         };
         assert_eq!(step, 2);
-        // And it says which tensors went, rather than only that something did.
-        assert!(!params.is_empty(), "nothing was reported as non-finite");
+        // Issue #23: an fp32 run used to answer this with "164 tensors are not
+        // finite, from embed.weight through norm.gamma", because the NaN
+        // gradient was applied before anything looked at it. The update is now
+        // rejected at every precision, so what the run reports is the loss
+        // coming apart and not the wreckage afterwards.
+        assert!(params.is_empty(), "a rejected update reached the weights: {params:?}");
+        assert!(message.contains("came apart in the forward"), "unhelpful message: {message}");
+    }
+
+    /// An fp32 run has no loss scaler, so before issue #23 it took the
+    /// unguarded `Optim::step` and a NaN gradient went straight into both
+    /// optimizers' state. The gate has to be on the plain path too.
+    #[test]
+    fn an_fp32_run_rejects_a_nonfinite_gradient_without_moving_the_model() {
+        let device = Device::default().autodiff();
+        let cfg = config::Model::toy();
+        let model = Quasar::new(&cfg, &device);
+        let before = model.clone().collect(None, None, false);
+        let tokens = Tensor::<2, Int>::zeros([2, 8], &device);
+        let run = tiny_run();
+        assert!(run.head_dtype.is_none() && run.ffn_dtype.is_none() && run.mamba_dtype.is_none());
+        let mut optim = Optim::new(&run, &model);
+
+        optim.accumulate(
+            &model,
+            model.loss(tokens.clone(), tokens).total.mul_scalar(f64::NAN).backward(),
+        );
+        // `loss_scale` is 1.0 when no scaler is configured: the same call the
+        // loop now makes for every fp32 step.
+        let (model, finite) = optim.step_scaled(1e-3, model, 1.0);
+
+        assert!(!finite);
+        assert!(nonfinite(&model).is_empty(), "{:?}", nonfinite(&model));
+        for (before, after) in before.iter().zip(model.collect(None, None, false)) {
+            assert_eq!(
+                before.to_data().unwrap().to_vec::<f32>().unwrap(),
+                after.to_data().unwrap().to_vec::<f32>().unwrap(),
+                "{} moved after a rejected fp32 step",
+                before.full_path()
+            );
+        }
     }
 
     #[test]

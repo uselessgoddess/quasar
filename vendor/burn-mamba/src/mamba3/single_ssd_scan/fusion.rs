@@ -87,7 +87,8 @@ impl<B: FusionBackend + Mamba3SingleSsdScanBackendExt> Mamba3SingleSsdScanBacken
         let [batch, nchunks, chunk_len, _, nheads, per_head_dim] = v_bnl1hp.shape.dims::<6>();
         let state_rank = b_bnl1hr.shape.dims::<6>()[5];
         let tokens = nchunks * chunk_len;
-        let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL);
+        // One checkpoint opens each reconstruction block, plus the final state.
+        let checkpoint_count = tokens.div_ceil(RECONSTRUCTION_INTERVAL) + 1;
         let client = v_bnl1hp.client.clone();
         let packed = TensorIr::uninit(
             client.create_empty_handle(),

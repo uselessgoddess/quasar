@@ -104,3 +104,9 @@ opt-level = 2
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# The diagnostics for issue #23 live under experiments/ rather than examples/:
+# they answer one question about one failure and are not a usage of the crate.
+[[example]]
+name = "divergence_probe"
+path = "experiments/divergence_probe.rs"

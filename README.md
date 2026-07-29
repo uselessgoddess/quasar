@@ -173,9 +173,14 @@ There is one card behind that runner, so `stability`, `gpu-benchmark` and
 only when somebody asks for the number by name —
 `gh workflow run ci.yml --ref <branch> -f jobs=stability`, or, from a branch in
 a fork, `[ci: stability]` in the pull request description, which the next push
-picks up. Both selectors take `all`, `stability`, `benchmark` or `blueprints`,
-so asking about convergence does not also spend an hour on throughput. Take the
-line back out of the description once the answer is in.
+picks up. Both selectors take `all`, `stability`, `benchmark`, `blueprints` or
+`fineweb`, so asking about convergence does not also spend an hour on
+throughput. `fineweb` is a special case: it is never included in `all`, because
+[`examples/fineweb_soak.sh`](examples/fineweb_soak.sh) is the explicit
+3–4-hour acceptance run over 235.9M tokens from the pinned FineWeb-Edu 10BT
+snapshot. It requires 1800/1800 steps, no non-finite gradients, falling train
+loss and validation bpb, and median steady throughput of at least 17k tok/s.
+Take the line back out of the description once the answer is in.
 
 ## Factorio blueprints
 

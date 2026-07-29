@@ -10,12 +10,14 @@ on:
   # benchmark job needs it, and a skipped dependency skips its dependents.
   #
   # A pull request asks the same question by putting `[ci: stability]` (or
-  # `all`, `benchmark`, `blueprints`) in its description; the next push to the
-  # branch then runs that job and nothing else self-hosted. `workflow_dispatch`
-  # cannot reach a branch that lives in a fork, and a contributor working from
-  # one has no labels to set, so the description is the only channel they have.
-  # Take the line back out once the number is in, or every further push spends
-  # the card again.
+  # `benchmark`, `blueprints`, `fineweb`) in its description; the next push to
+  # the branch then runs that job and nothing else self-hosted.
+  # `workflow_dispatch` cannot reach a branch that lives in a fork, and a
+  # contributor working from one has no labels to set, so the description is
+  # the only channel they have. `fineweb` is deliberately excluded from `all`:
+  # it is a four-hour acceptance run, not another per-commit check. Take the
+  # line back out once the number is in, or every further push spends the card
+  # again.
   workflow_dispatch:
     inputs:
       jobs:
@@ -27,6 +29,7 @@ on:
           - stability
           - benchmark
           - blueprints
+          - fineweb
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -60,6 +63,7 @@ jobs:
       - run: cargo test --manifest-path vendor/burn-mamba/Cargo.toml --lib
         env:
           CARGO_TARGET_DIR: target
+      - run: python3 experiments/test_fineweb_report.py
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 
@@ -268,6 +272,56 @@ jobs:
           path: |
             benchmark-logs/stability/*.log
             benchmark-logs/stability/*.result
+
+  # The short synthetic stability matrix answers whether the reported failure
+  # still happens around step 90. This one answers the stronger acceptance
+  # question from issue #23: does the fastest production recipe keep learning
+  # for 235.9M real FineWeb-Edu tokens? It is never implied by `push` or `all`;
+  # four hours on the repository's only card must be requested by this exact
+  # selector:
+  #     gh workflow run ci.yml --ref <branch> -f jobs=fineweb
+  # or `[ci: fineweb]` in a fork pull request before its next push.
+  fineweb-soak:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.jobs == 'fineweb')
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.body, '[ci: fineweb]'))
+    runs-on: self-hosted
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record GPU runtime
+        run: |
+          mkdir -p benchmark-logs/fineweb
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            cargo -V
+            uname -a
+            rocminfo | grep -m1 -E 'Name:.*gfx'
+            rocm-smi --showproductname --showmeminfo vram --showclocks \
+              --showuse --showtemp --showpower
+          } 2>&1 | tee benchmark-logs/fineweb/environment.log
+      # One pinned 2.15-GB parquet shard contains more than the 235.9M tokens
+      # the run consumes. Cache both it and the derived 8k-token shards so a
+      # runner interruption resumes at training rather than redownloading 10BT.
+      - name: Cache the pinned FineWeb-Edu shard
+        uses: actions/cache@v4
+        with:
+          path: data/fineweb-soak
+          key: fineweb-edu-10bt-000-87f09149-vocab8192-v1
+      - name: Train 235.9M real tokens with the fastest accepted recipe
+        run: examples/fineweb_soak.sh
+      - name: Preserve the learning evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fineweb-soak
+          path: |
+            benchmark-logs/fineweb/*.log
+            benchmark-logs/fineweb/*.result
 
   # P7 bypasses CubeCL's AMD matmul compiler and measures the vendor library
   # directly on the same forward/backward projection triplet as the Vulkan

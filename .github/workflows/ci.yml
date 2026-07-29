@@ -8,6 +8,14 @@ on:
   # convergence run it was asked for even starts, so the dispatch says which
   # question it is asking. `benchmark` carries `backend-spike` with it: the
   # benchmark job needs it, and a skipped dependency skips its dependents.
+  #
+  # A pull request asks the same question by putting `[ci: stability]` (or
+  # `all`, `benchmark`, `blueprints`) in its description; the next push to the
+  # branch then runs that job and nothing else self-hosted. `workflow_dispatch`
+  # cannot reach a branch that lives in a fork, and a contributor working from
+  # one has no labels to set, so the description is the only channel they have.
+  # Take the line back out once the number is in, or every further push spends
+  # the card again.
   workflow_dispatch:
     inputs:
       jobs:
@@ -80,8 +88,11 @@ jobs:
   # contact sheet are what say whether it worked.
   blueprints:
     if: >-
-      github.event_name == 'workflow_dispatch'
-      && (inputs.jobs == 'all' || inputs.jobs == 'blueprints')
+      (github.event_name == 'workflow_dispatch'
+       && (inputs.jobs == 'all' || inputs.jobs == 'blueprints'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: blueprints]')))
     runs-on: self-hosted
     timeout-minutes: 75
     steps:
@@ -145,13 +156,17 @@ jobs:
   # Not per commit. There is one card and therefore one queue, and an hour of it
   # spent on a branch that is still being edited is an hour the next branch waits
   # -- so the self-hosted jobs run on push to main, where the number becomes the
-  # baseline, and on `workflow_dispatch`, where somebody is asking for it:
+  # baseline, and where somebody is asking for it by name:
   #     gh workflow run ci.yml --ref <branch> -f jobs=benchmark
+  # or, from a fork branch, by putting `[ci: benchmark]` in the pull request.
   gpu-benchmark:
     if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_dispatch'
-          || inputs.jobs == 'all' || inputs.jobs == 'benchmark')
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'benchmark'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: benchmark]')))
     needs: backend-spike
     runs-on: self-hosted
     timeout-minutes: 60
@@ -215,9 +230,12 @@ jobs:
   # than per commit, for the same reason as `gpu-benchmark`.
   stability:
     if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_dispatch'
-          || inputs.jobs == 'all' || inputs.jobs == 'stability')
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'stability'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: stability]')))
     runs-on: self-hosted
     timeout-minutes: 90
     steps:
@@ -257,9 +275,12 @@ jobs:
   # Dispatched rather than per commit, for the same reason as `gpu-benchmark`.
   backend-spike:
     if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_dispatch'
-          || inputs.jobs == 'all' || inputs.jobs == 'benchmark')
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch'
+          && (inputs.jobs == 'all' || inputs.jobs == 'benchmark'))
+      || (github.event_name == 'pull_request'
+          && (contains(github.event.pull_request.body, '[ci: all]')
+              || contains(github.event.pull_request.body, '[ci: benchmark]')))
     runs-on: self-hosted
     timeout-minutes: 30
     steps:

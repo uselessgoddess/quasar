@@ -169,11 +169,13 @@ whether a recipe produces one, which is why this runs on the self-hosted runner
 as the `stability` job.
 
 There is one card behind that runner, so `stability`, `gpu-benchmark` and
-`backend-spike` do not run per commit: they run on push to `main` and on
-`gh workflow run ci.yml --ref <branch> -f jobs=stability`, when somebody is
-actually asking for the number. `jobs` selects `all`, `stability`, `benchmark`
-or `blueprints`, so asking about convergence does not also spend an hour on
-throughput.
+`backend-spike` do not run per commit: they run on push to `main`, and otherwise
+only when somebody asks for the number by name —
+`gh workflow run ci.yml --ref <branch> -f jobs=stability`, or, from a branch in
+a fork, `[ci: stability]` in the pull request description, which the next push
+picks up. Both selectors take `all`, `stability`, `benchmark` or `blueprints`,
+so asking about convergence does not also spend an hour on throughput. Take the
+line back out of the description once the answer is in.
 
 ## Factorio blueprints
 

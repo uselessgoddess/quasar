@@ -27,8 +27,8 @@ import random
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 
+from . import benchmark, dataset, grammar, inference, plots, prototypes, render, synth, validate
 from . import blueprint as bp
-from . import dataset, grammar, plots, prototypes, render, synth, validate
 
 # Rule width for the printed tables. 72 so that two of them fit side by side in
 # a 150-column terminal and neither wraps in an 80-column one.
@@ -115,6 +115,36 @@ def _parser() -> argparse.ArgumentParser:
     )
     grade.set_defaults(run=_grade)
 
+    bench = sub.add_parser(
+        "benchmark", help="grade the fixed repeated module benchmark with confidence intervals"
+    )
+    bench.add_argument("samples", type=pathlib.Path)
+    bench.add_argument("--json", type=pathlib.Path, help="write the full stratified report")
+    bench.add_argument("--confidence", type=float, default=0.95)
+    bench.add_argument("--bootstrap", type=int, default=2_000, help="bootstrap resamples")
+    bench.add_argument("--seed", type=int, default=0, help="deterministic bootstrap seed")
+    bench.set_defaults(run=_benchmark)
+
+    select = sub.add_parser(
+        "select-rejections",
+        help="take the first valid/spec-honouring attempt per prompt",
+    )
+    select.add_argument("samples", type=pathlib.Path)
+    select.add_argument("out", type=pathlib.Path)
+    select.set_defaults(run=_select_rejections)
+
+    compare = sub.add_parser(
+        "compare-inference",
+        help="compare constrained decoding with selected reject/regenerate output",
+    )
+    compare.add_argument("constrained", type=pathlib.Path)
+    compare.add_argument("rejected", type=pathlib.Path)
+    compare.add_argument("--json", type=pathlib.Path)
+    compare.add_argument("--confidence", type=float, default=0.95)
+    compare.add_argument("--bootstrap", type=int, default=2_000)
+    compare.add_argument("--seed", type=int, default=0)
+    compare.set_defaults(run=_compare_inference)
+
     plot = sub.add_parser("plot", help="metric panels from a training log")
     plot.add_argument("log", type=pathlib.Path, help="quasar train stdout, or - for stdin")
     plot.add_argument("out", type=pathlib.Path)
@@ -129,7 +159,7 @@ def _parser() -> argparse.ArgumentParser:
     plot.add_argument(
         "--kind",
         default="module",
-        help="the generator that gets a flow panel of its own (default: module); empty for none",
+        help="the kind or shape that gets a flow panel (default: module); empty for none",
     )
     plot.add_argument("--columns", type=int, default=2)
     plot.set_defaults(run=_plot)
@@ -194,6 +224,9 @@ def _build(args) -> int:
             ("layouts redrawn", stats.repeats),
             ("duplicates dropped", stats.duplicates),
             ("rejected", stats.rejected),
+            ("benchmark excluded", stats.benchmark_excluded),
+            ("benchmark prompts", stats.benchmark_prompts),
+            ("DAG benchmark prompts", stats.dag_benchmark_prompts),
             ("train tokens", stats.train_tokens),
             ("valid tokens", stats.valid_tokens),
             ("vocab", stats.vocab_size),
@@ -316,6 +349,89 @@ def _grade(args) -> int:
     if args.sheet:
         _sheet(args.sheet, reports, data, columns=args.columns, order=args.order)
         print(f"\n{args.sheet}")
+    return 0
+
+
+def _benchmark(args) -> int:
+    """The primary module verdict, with repeated sampling and uncertainty."""
+    data = prototypes.load()
+    result = benchmark.evaluate(
+        list(_samples(args.samples)),
+        data,
+        confidence=args.confidence,
+        iterations=args.bootstrap,
+        seed=args.seed,
+    )
+    title = (
+        "DAG FLOW BENCHMARK" if result["benchmark"] == benchmark.DAG_VERSION else "MODULE BENCHMARK"
+    )
+    _rule(title, str(args.samples))
+    _rows(
+        [
+            ("version", result["benchmark"]),
+            ("samples", result["samples"]),
+            ("fixed prompts", result["prompts"]),
+            ("target strata", result["targets"]),
+            ("fork prompts", result["fork_prompts"]),
+            ("factory prompts", result["factory_prompts"]),
+            ("sampling replicates", result["replicates"]),
+        ]
+    )
+    _rule(f"{args.confidence:.0%} CONFIDENCE", result["confidence"]["method"])
+    for name, interval in result["confidence"]["metrics"].items():
+        note = f"{interval['mean']:.3f} [{interval['low']:.3f}, {interval['high']:.3f}]"
+        _bar(name, interval["mean"], note)
+    _rule("BY REPLICATE")
+    for row in result["by_replicate"]:
+        summary = row["summary"]
+        _rows(
+            [
+                (
+                    f"replicate {row['replicate']}",
+                    f"flow {summary['mean_flow']:.3f} valid {summary['valid_rate']:.3f}",
+                )
+            ]
+        )
+    if args.json:
+        _write(args.json, (json.dumps(result, indent=2) + "\n").encode())
+    return 0
+
+
+def _select_rejections(args) -> int:
+    chosen = inference.select(list(_samples(args.samples)), prototypes.load())
+    payload = "".join(json.dumps(record, sort_keys=True) + "\n" for record in chosen)
+    _write(args.out, payload.encode())
+    accepted = sum(record["accepted"] for record in chosen)
+    generated = sum(record["attempt_budget"] for record in chosen)
+    print(f"{accepted}/{len(chosen)} accepted from {generated} generated attempts -> {args.out}")
+    return 0
+
+
+def _compare_inference(args) -> int:
+    result = inference.compare(
+        list(_samples(args.constrained)),
+        list(_samples(args.rejected)),
+        prototypes.load(),
+        confidence=args.confidence,
+        iterations=args.bootstrap,
+        seed=args.seed,
+    )
+    _rule("INFERENCE A/B", f"{result['prompts']} fixed prompts")
+    for name, method in result["methods"].items():
+        summary = method["summary"]
+        _rows(
+            [
+                (name.replace("_", " "), ""),
+                ("generated attempts", method["generated_attempts"]),
+                ("mean attempts used", f"{method['mean_attempts_used']:.2f}"),
+                ("accepted", f"{method['accepted']}/{result['prompts']}"),
+                ("valid", f"{summary['valid_rate']:.3f}"),
+                ("spec honoured", f"{summary['spec_rate']:.3f}"),
+                ("flow", f"{summary['mean_flow']:.3f}"),
+            ]
+        )
+    if args.json:
+        _write(args.json, (json.dumps(result, indent=2) + "\n").encode())
     return 0
 
 
@@ -446,15 +562,19 @@ def _flow_panels(
 
 
 def _of_kind(samples: Iterable[dict], kind: str | None) -> list[dict]:
-    """The generations whose prompt came from one generator.
+    """The generations whose prompt came from one generator kind or shape.
 
     `quasar generate` copies every field of a prompt record into the sample it
-    writes, so the kind rides along with the generation and nothing has to be
-    matched up afterwards. A sample with no `kind` at all — a hand-written
-    prompt file — belongs to no generator and is dropped rather than counted.
+    writes, so both fields ride along with the generation and nothing has to be
+    matched up afterwards. A sample with neither match — including a
+    hand-written prompt file — is dropped rather than counted.
     """
     samples = list(samples)
-    return samples if not kind else [s for s in samples if s.get("kind") == kind]
+    return (
+        samples
+        if not kind
+        else [s for s in samples if s.get("kind") == kind or s.get("shape") == kind]
+    )
 
 
 def _summaries(

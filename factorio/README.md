@@ -137,15 +137,46 @@ cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
     --tokenizer corpus/tokenizer.json \
     --prompts corpus/prompts.jsonl --out runs/nano/samples-000400.jsonl --tokens 460
 
+# the primary module benchmark: 64 fixed prompts, all 29 targets, five fork
+# strata, and independent recorded seeds without reloading the checkpoint
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json \
+    --prompts corpus/benchmark.jsonl --out runs/nano/benchmark-samples-000400.jsonl \
+    --tokens 460 --repeats 2
+
+# the companion DAG benchmark: three targets over the same 8 held-out route
+# combinations, one deterministic port/orientation prompt per target/layout
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json \
+    --prompts corpus/dag-benchmark.jsonl --out runs/nano/dag-samples-000400.jsonl \
+    --tokens 460
+
 # score it, draw it, plot it
 python -m quasar_factorio.cli grade runs/nano/samples.jsonl \
     --sheet runs/nano/sheet.png --json runs/nano/grade.json
 
-# the same, over one generator's generations only -- `== GRADE MODULES ==`
-python -m quasar_factorio.cli grade runs/nano/samples.jsonl --kind module
+# a stratified report with a 95% prompt-and-sampling bootstrap interval
+python -m quasar_factorio.cli benchmark \
+    runs/nano/benchmark-samples-000400.jsonl --json runs/nano/benchmark.json
+python -m quasar_factorio.cli benchmark \
+    runs/nano/dag-samples-000400.jsonl --json runs/nano/dag-benchmark.json
+
+# Prevent malformed/overlapping/off-zone/illegal placements while sampling
+cargo run --release --features vulkan -- generate runs/nano/step_0000400 \
+    --tokenizer corpus/tokenizer.json --constraints corpus/constraints.json \
+    --prompts corpus/benchmark.jsonl --out runs/nano/constrained.jsonl --tokens 460
+
+# Or spend two unconstrained attempts per prompt and accept the first hard-valid
+# one; then report quality together with the actual 128-vs-64 model-sample cost
+python -m quasar_factorio.cli select-rejections \
+    runs/nano/benchmark-samples-000400.jsonl runs/nano/rejected.jsonl
+python -m quasar_factorio.cli compare-inference \
+    runs/nano/constrained.jsonl runs/nano/rejected.jsonl --json runs/nano/inference.json
 
 python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/metrics.png \
-    --grade runs/nano/samples-*.jsonl
+    --grade runs/nano/benchmark-samples-*.jsonl
+python -m quasar_factorio.cli plot runs/nano/train.log runs/nano/dag-metrics.png \
+    --kind factory --grade runs/nano/dag-samples-*.jsonl
 
 # and the end of the whole thing: something to paste into the game
 python -m quasar_factorio.cli export design.txt | xclip -selection clipboard
@@ -159,6 +190,26 @@ Every command reads something off disk, writes something to disk and prints what
 it did. That is what makes the loop debuggable: every intermediate is sitting
 there to be looked at, and any step can be re-run on its own without rebuilding
 the ones before it.
+
+`module-v1` is deliberately pinned rather than rebuilt from the live catalogue:
+each of the 29 targets appears at least twice, every branching target a third
+time, and the electronic-circuit flagship fills the 64th slot. Its reference
+layouts are reserved before either training shard is written. Changing the
+corpus seed therefore cannot move the evaluation goalposts or leak an exact
+benchmark layout into training. `generate --repeats` copies the benchmark
+metadata and adds `replicate` and `sampling_seed` to every row; `benchmark`
+refuses incomplete replicates and bootstraps within target and prompt strata
+instead of treating repeated generations of one specification as unrelated
+examples.
+
+`dag-v3` is separate for the same reason. Green science, power switch and fast
+splitter each have 32 canonical route forms. The same eight combinations of
+spacing, edge margin and two target-specific route choices are reserved per
+target; the other 24 remain available to training. One stable port/orientation
+prompt per target/form makes 24 balanced conditions in total. Thus the DAG
+curve measures geometric composition and transfer across three recipe graphs
+without leaking reference layouts or pushing the already near-limit GPU job
+past its 75-minute budget.
 
 ## What the corpus is
 
@@ -181,14 +232,35 @@ to invent them; a mis-remembered ratio produces a factory that looks perfect and
 starves, and there is no reason to buy a probabilistic version of a table that
 is already exact.
 
-A chain is not always a line. `plan.modules` catalogues 29 targets, and five of
-them branch: the last machine wants two items that both have to be made, which a
+A chain is not always a line. The live `plan.modules` catalogue has 32 targets.
+Five branch: the last machine wants two items that both have to be made, which a
 run of stacked bands cannot deliver — a belt hands its product downstream and
 nowhere else, so the first of the two would sail past the row that wants it.
 `plan.fork` splits such a plan into two branches converging on its last stage,
 and `synth` draws them as two bottom-aligned columns dropping onto one belt with
-that stage beneath it. Which of the two layouts a target gets is derived from
-the plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
+that stage beneath it. Which generic layout a target gets is derived from the
+plan (`Module.shape`) rather than chosen, so it cannot contradict the stages.
+
+The last three are deliberately less generic. Green science is a six-recipe
+diamond: gears feed both middle branches, and the inserter needs circuits,
+gears, and iron plate, one item more than a belt has lanes. Its `factory` layout
+therefore has two external iron belts, a shared circuit-and-gear belt, and an
+underground crossing before the two products meet at the science assembler.
+Power switch is the second DAG: cable feeds both circuits and a three-ingredient
+final assembler. Its shared iron-and-cable belt and separate circuit belt test
+the same hard constraints with a different topology. Fast splitter is the third
+and first double diamond: six stages share both circuits and gears, and both the
+splitter and fast-splitter stages join three ingredients delivered over
+separate two-item trunks. Each conveyor graph is drawn in 32 canonical forms:
+four spacings, two edge margins and two independent target-specific route
+choices. Rotations, reflections and belt tiers do not count toward those 32
+because corpus canonicalisation already identifies them. The pinned
+`module-v1` baseline remains the preceding 29-target task, while `dag-v3`
+measures all three capabilities on held-out route combinations.
+
+![Green science multi-belt factory](../docs/screenshots/green-science.png)
+
+![Three DAGs over eight held-out route combinations](../docs/screenshots/dag-v3-forms.png)
 
 Two decisions matter more than the rest:
 
@@ -209,13 +281,15 @@ generator that has run out of things to say costs a draw and adds nothing, and
 `experiments/saturation.py` says which ones those are. `build --module-weight`
 moves that share without touching the proportions among the rest.
 
-A 20,000-draw build measures 10,498 distinct layouts, 66,004 documents and
-14.12M training tokens at a 739-token vocabulary; 4,376 of the layouts are
-modules. The other 9,502 draws were forms of a layout already kept, and 13,996
-of the expanded documents came out byte-identical to one already written —
-drawing from eleven generators collides, and the manifest says by how much. The
-6,000 draws `examples/factorio.sh` defaults to give 4,304 layouts and 4.65M
-tokens, already more than a 3.6M-parameter model gets through in half an hour.
+The preceding `dag-v1` 20,000-draw build measured 10,599 distinct layouts,
+66,548 documents and 14.42M training tokens at a 739-token vocabulary; 4,353 of
+the layouts were modules. The other 9,401 draws were forms of a layout already
+kept, and 13,452 expanded documents came out byte-identical to one already
+written. A further 618 draws matched a canonical benchmark holdout and were
+excluded from both shards — drawing from eleven generators collides, and the
+manifest says by how much. With both `dag-v2` targets, the 6,000 draws
+`examples/factorio.sh` defaults to give 4,336 layouts and 4.77M tokens, already
+more than a 3.6M-parameter model gets through in half an hour.
 
 Building it is pure Python and runs before the GPU gets to do anything, so what
 it costs is worth knowing: `experiments/corpus_cost.py` prints the breakdown and
@@ -252,7 +326,7 @@ thing in the corpus because its parameter space is large precisely to the extent
 that nothing constrains it, and the module generator, whose space is the product
 of a target item, a chain the planner can lay out, a zone, and where its ports
 sit. That table is why the mixture is weighted at all: 20,000 weighted draws
-measure 10,498 layouts where 35,200 flat ones measure 8,362, because the draws
+measure 10,599 layouts where 35,200 flat ones measure 8,362, because the draws
 that would have gone to a generator with 44 forms in it go to the two that are
 still saying something new.
 
@@ -313,10 +387,10 @@ and a book holds seventeen blueprints on average:
 
 14% survives, for 4,716 distinct layouts, 48,126 documents and 7.81M tokens —
 mean 30 entities in a 10x9 footprint. That is what changes the arithmetic. A
-20,000-draw synthetic build is 14.1M tokens against a Chinchilla budget of
+20,000-draw synthetic build is 14.4M tokens against a Chinchilla budget of
 71.4M, so synthetic-only is five passes over everything it can say, where the
 data-constrained scaling laws put the point at which repeating stops being
-nearly free at four. 14.1M + 7.8M is 21.9M unique tokens against the 17.9M that
+nearly free at four. 14.4M + 7.8M is 22.2M unique tokens against the 17.9M that
 four epochs of the budget need: the human half is not a garnish here, it is what
 puts the run under four epochs instead of over.
 

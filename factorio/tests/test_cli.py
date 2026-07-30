@@ -67,9 +67,12 @@ def test_a_document_that_is_not_one_is_an_error_message(capsys, tmp_path):
 
 def test_build_writes_everything_quasar_train_needs(corpus):
     assert (corpus / "tokenizer.json").is_file()
+    assert (corpus / "constraints.json").is_file()
     assert (corpus / "train" / "meta.json").is_file()
     assert (corpus / "valid" / "meta.json").is_file()
     assert list((corpus / "train").glob("*.bin"))
+    assert (corpus / "benchmark.jsonl").is_file()
+    assert (corpus / "dag-benchmark.jsonl").is_file()
 
 
 def test_the_manifest_agrees_with_what_was_asked_for(corpus):
@@ -79,6 +82,8 @@ def test_the_manifest_agrees_with_what_was_asked_for(corpus):
     # rejection here is a bug rather than an acceptable loss.
     assert manifest["rejected"] == 0
     assert manifest["vocab_size"] == 739
+    assert manifest["benchmark_prompts"] == 64
+    assert manifest["dag_benchmark_prompts"] == 24
 
 
 def test_the_held_out_prompts_carry_what_a_grader_needs(corpus):
@@ -309,16 +314,22 @@ def test_the_module_slice_gets_a_flow_panel_of_its_own(document, tmp_path):
         path.write_text(
             json.dumps({"kind": "smelter-column", "text": document.read_text()})
             + "\n"
-            + json.dumps({"kind": "module", "text": _module(step)})
+            + json.dumps({"kind": "module", "shape": "factory", "text": _module(step)})
             + "\n"
         )
         files.append(str(path))
 
-    with_panel, without = tmp_path / "module.png", tmp_path / "plain.png"
+    with_panel = tmp_path / "module.png"
+    with_shape_panel = tmp_path / "factory.png"
+    without = tmp_path / "plain.png"
     assert main(["plot", str(log), str(with_panel), "--grade", *files]) == 0
+    assert (
+        main(["plot", str(log), str(with_shape_panel), "--kind", "factory", "--grade", *files]) == 0
+    )
     assert main(["plot", str(log), str(without), "--kind", "", "--grade", *files]) == 0
 
     assert len(with_panel.read_bytes()) > len(without.read_bytes())
+    assert len(with_shape_panel.read_bytes()) > len(without.read_bytes())
 
 
 def test_a_checkpoint_with_no_module_in_it_is_left_off_the_flow_panel(document, tmp_path):

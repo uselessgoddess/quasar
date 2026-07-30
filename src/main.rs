@@ -122,6 +122,16 @@ enum Command {
         top_k: usize,
         #[arg(long, default_value_t = 1337)]
         seed: u64,
+        /// Independent samples per prompt. Each gets its own recorded seed, so
+        /// a benchmark can estimate sampling variance without loading the
+        /// checkpoint again for every replicate.
+        #[arg(long, default_value_t = 1)]
+        repeats: usize,
+        /// Incremental Factorio grammar/geometry schema emitted by the corpus
+        /// builder. Impossible syntax, overlaps, footprints, and recipes are
+        /// masked before top-k sampling.
+        #[arg(long)]
+        constraints: Option<PathBuf>,
     },
 }
 
@@ -293,13 +303,23 @@ fn main() -> Result<()> {
             temperature,
             top_k,
             seed,
+            repeats,
+            constraints,
         } => {
             let sampler = generate::Sampler { temperature, top_k, max_tokens: tokens, seed };
             let asked = match prompts {
                 Some(path) => asks(&path)?,
                 None => vec![Ask { prompt, record: serde_json::Map::new() }],
             };
-            sample(&run, &tokenizer, &asked, out.as_deref(), &sampler)
+            sample(
+                &run,
+                &tokenizer,
+                &asked,
+                out.as_deref(),
+                &sampler,
+                repeats,
+                constraints.as_deref(),
+            )
         }
     }
 }
@@ -481,22 +501,29 @@ struct Ask {
 ///
 /// Loading a checkpoint costs far more than sampling from it, so a sweep of two
 /// hundred prompts belongs in one process rather than two hundred. Each prompt
-/// samples from its own seed: sharing one would draw the same noise every time
-/// and pass it off as a varied sweep.
+/// and replicate samples from its own recorded seed: sharing one would draw the
+/// same noise every time and pass it off as a varied sweep.
 fn sample(
     run: &Path,
     tokenizer: &Path,
     asked: &[Ask],
     out: Option<&Path>,
     sampler: &generate::Sampler,
+    repeats: usize,
+    constraints: Option<&Path>,
 ) -> Result<()> {
+    if repeats == 0 {
+        anyhow::bail!("--repeats must be at least 1");
+    }
     let (cfg, dir) = trained(run)?;
     let device = Device::default();
     let mut model = Quasar::new(&cfg, &device);
     checkpoint::weights(&dir, &mut model)?;
     let tokenizer = Tokenizer::load(tokenizer)?;
+    let constraints =
+        constraints.map(|path| generate::FactorioGrammar::load(path, &tokenizer)).transpose()?;
 
-    let bar = ProgressBar::new(asked.len() as u64).with_style(
+    let bar = ProgressBar::new((asked.len() * repeats) as u64).with_style(
         ProgressStyle::with_template("{bar:32} {pos}/{len} sampled in {elapsed}").unwrap(),
     );
     if out.is_none() {
@@ -504,24 +531,49 @@ fn sample(
     }
 
     let mut lines = String::new();
-    for (index, ask) in asked.iter().enumerate() {
-        let seeded =
-            generate::Sampler { seed: sampler.seed.wrapping_add(index as u64), ..*sampler };
-        let text =
-            generate::generate(&model, &tokenizer, &ask.prompt, cfg.seq_len, &seeded, &device)?;
-        match out {
-            // `text` already holds the prompt as well as the continuation,
-            // which is what a grader needs: half a blueprint parses as none.
-            Some(_) => {
-                let mut record = ask.record.clone();
-                record.insert("prompt".into(), ask.prompt.clone().into());
-                record.insert("text".into(), text.into());
-                lines.push_str(&serde_json::to_string(&record)?);
-                lines.push('\n');
+    for replicate in 0..repeats {
+        for (index, ask) in asked.iter().enumerate() {
+            let seed = replicated_seed(sampler.seed, asked.len(), replicate, index);
+            let seeded = generate::Sampler { seed, ..*sampler };
+            let text = match constraints.as_ref() {
+                Some(grammar) => generate::generate_constrained(
+                    &model,
+                    &tokenizer,
+                    &ask.prompt,
+                    cfg.seq_len,
+                    &seeded,
+                    grammar,
+                    &device,
+                )?,
+                None => generate::generate(
+                    &model,
+                    &tokenizer,
+                    &ask.prompt,
+                    cfg.seq_len,
+                    &seeded,
+                    &device,
+                )?,
+            };
+            match out {
+                // `text` already holds the prompt as well as the continuation,
+                // which is what a grader needs: half a blueprint parses as none.
+                Some(_) => {
+                    let mut record = ask.record.clone();
+                    record.insert("prompt".into(), ask.prompt.clone().into());
+                    record.insert("text".into(), text.into());
+                    record.insert("replicate".into(), replicate.into());
+                    record.insert("sampling_seed".into(), seed.into());
+                    record.insert(
+                        "decoding".into(),
+                        if constraints.is_some() { "constrained" } else { "unconstrained" }.into(),
+                    );
+                    lines.push_str(&serde_json::to_string(&record)?);
+                    lines.push('\n');
+                }
+                None => println!("{text}"),
             }
-            None => println!("{text}"),
+            bar.inc(1);
         }
-        bar.inc(1);
     }
     bar.finish_and_clear();
 
@@ -530,9 +582,13 @@ fn sample(
             fs::create_dir_all(parent)?;
         }
         fs::write(path, lines).with_context(|| format!("cannot write {}", path.display()))?;
-        println!("{} samples -> {}", asked.len(), path.display());
+        println!("{} samples -> {}", asked.len() * repeats, path.display());
     }
     Ok(())
+}
+
+fn replicated_seed(base: u64, prompts: usize, replicate: usize, index: usize) -> u64 {
+    base.wrapping_add((replicate as u64).wrapping_mul(prompts as u64).wrapping_add(index as u64))
 }
 
 /// Prompts from a jsonl file, or from a plain file of one prompt per line.
@@ -914,6 +970,17 @@ mod tests {
         assert!(asked[0].record.contains_key("spec"));
         assert_eq!(asked[1].prompt, "<bp> plain");
         assert!(asked[1].record.is_empty());
+    }
+
+    #[test]
+    fn repeated_prompt_seeds_are_unique_and_stable() {
+        let seeds: Vec<_> = (0..3)
+            .flat_map(|replicate| {
+                (0..4).map(move |index| replicated_seed(1_337, 4, replicate, index))
+            })
+            .collect();
+
+        assert_eq!(seeds, (1_337..1_349).collect::<Vec<_>>());
     }
 
     #[test]
